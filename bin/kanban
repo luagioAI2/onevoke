@@ -898,11 +898,10 @@ def check_concurrency(config: dict, board: Board) -> None:
         ))
 
 
-def command_start(args: argparse.Namespace, root: Path) -> None:
-    board = load_board(root)
-    entry = select_todo(board, args.task)
-    config = effective_config(load_config())
-    check_concurrency(config, board)
+def _launcher_env(
+    args: argparse.Namespace, config: dict
+) -> tuple[str, str, str, Optional[str], Optional[str]]:
+    """校验并返回 (agent_name, launcher, agent_binary, tmux, session)."""
     agent_name = args.agent or config["kanban_agent"]
     launcher = args.launcher or config["launcher"]
     agent = shutil.which(agent_name)
@@ -920,7 +919,20 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             "前台启动模式需要交互终端 (stdin/stdout/stderr 均为 tty). 在 CI、管道或无 TTY 环境请改用: kanban start --launcher tmux <task-id>",
             "Foreground mode requires an interactive terminal (stdin/stdout/stderr must be TTYs). In CI, pipelines, or environments without a TTY, use: kanban start --launcher tmux <task-id>",
         ))
+    return agent_name, launcher, agent, tmux, session
 
+
+def _start_one(
+    entry: Entry,
+    root: Path,
+    agent_name: str,
+    launcher: str,
+    agent: str,
+    tmux: Optional[str],
+    session: Optional[str],
+    model_override: Optional[str],
+) -> str:
+    """启动单张卡: todo -> working, 写元数据, 拉起 Agent. 返回窗口 id 或空串."""
     original = read_document(entry)
     updated = start_metadata(original, agent_name)
     moved = move_entry(entry, root, "working")
@@ -939,8 +951,9 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     )
     name = window_name(entry, original)
     effort = task_effort(agent_name, entry.kind)
-    model = getattr(args, "model", None) or task_model(agent_name, entry.kind)
+    model = model_override or task_model(agent_name, entry.kind)
     agent_argv = agent_command(agent_name, agent, model, effort, prompt)
+    window = ""
     try:
         write_text_atomic(moved.document, updated, entry=moved)
         if launcher == "tmux":
@@ -1006,11 +1019,76 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
                 f"Agent 已启动但以非零状态退出: {returncode}; 卡片保留在 working",
                 f"Agent started but exited with status {returncode}; task remains in working",
             ))
-        return
+        return ""
+    return window
+
+
+def command_start_all(
+    args: argparse.Namespace, root: Path, board: Board, config: dict
+) -> None:
+    """批量启动全部 todo 卡, 受 max_concurrent_tasks 与 --limit 约束."""
+    launcher = args.launcher or config["launcher"]
+    if launcher == "foreground":
+        raise KanbanError(t(
+            "--all 批量启动只支持 tmux launcher; 前台模式一次只能启动一张卡.",
+            "--all requires the tmux launcher; foreground starts one task at a time.",
+        ))
+    todos = sorted(
+        (entry for entry in board.entries.values() if entry.state == "todo"),
+        key=lambda entry: entry.task_id,
+    )
+    if not todos:
+        raise KanbanError(t("todo 中没有可启动的任务", "No todo tasks to start"))
+    agent_name, _, agent, tmux, session = _launcher_env(args, config)
+
+    limit = int(os.environ.get("KANBAN_MAX_CONCURRENT_TASKS", config["max_concurrent_tasks"]))
+    working = sum(1 for entry in board.entries.values() if entry.state == "working")
+    available = len(todos) if limit <= 0 else max(0, limit - working)
+    if args.limit is not None:
+        available = min(available, args.limit)
+    if available <= 0:
+        raise KanbanError(t(
+            f"无可用并发名额 (working={working}, max_concurrent_tasks={limit if limit > 0 else '无限'}); "
+            f"先完成或归档部分任务, 或调大 max_concurrent_tasks.",
+            f"No concurrency slots available (working={working}, max_concurrent_tasks={limit if limit > 0 else 'unlimited'}); "
+            f"finish or archive tasks first, or raise max_concurrent_tasks.",
+        ))
+
+    selected = todos[:available]
+    started = 0
+    for entry in selected:
+        try:
+            window = _start_one(entry, root, agent_name, launcher, agent, tmux, session,
+                                getattr(args, "model", None))
+            started += 1
+            print(t(
+                f"已启动: {entry.task_id}\tAgent={agent_name}\t窗口={window or '-'}",
+                f"started: {entry.task_id}\tagent={agent_name}\twindow={window or '-'}",
+            ))
+        except (KanbanError, OSError, UnicodeError) as error:
+            print(t(f"启动失败: {entry.task_id}: {error}", f"start failed: {entry.task_id}: {error}"), file=sys.stderr)
     print(t(
-        f"已启动: {entry.task_id}\tAgent={agent_name}\t窗口={window}",
-        f"started: {entry.task_id}\tagent={agent_name}\twindow={window}",
+        f"批量启动完成: 成功 {started}/{len(selected)}, todo 剩余 {len(todos) - started}",
+        f"batch start done: {started}/{len(selected)} started, {len(todos) - started} todo remaining",
     ))
+
+
+def command_start(args: argparse.Namespace, root: Path) -> None:
+    board = load_board(root)
+    config = effective_config(load_config())
+    if getattr(args, "all", False):
+        command_start_all(args, root, board, config)
+        return
+    entry = select_todo(board, args.task)
+    check_concurrency(config, board)
+    agent_name, launcher, agent, tmux, session = _launcher_env(args, config)
+    window = _start_one(entry, root, agent_name, launcher, agent, tmux, session,
+                        getattr(args, "model", None))
+    if launcher == "tmux":
+        print(t(
+            f"已启动: {entry.task_id}\tAgent={agent_name}\t窗口={window}",
+            f"started: {entry.task_id}\tagent={agent_name}\twindow={window}",
+        ))
 
 
 def command_check(root: Path) -> int:
@@ -1066,6 +1144,8 @@ def parser() -> argparse.ArgumentParser:
 
     start_parser = commands.add_parser("start", help=t("领取任务并按 Onevoke 配置启动 Agent", "claim a task and launch an Agent using Onevoke configuration"))
     start_parser.add_argument("task", nargs="?", metavar=t("任务", "task"))
+    start_parser.add_argument("--all", action="store_true", help=t("批量启动全部 todo 卡 (每个一个 tmux 窗口)", "start all todo tasks (one tmux window each)"))
+    start_parser.add_argument("--limit", type=int, metavar=t("数量", "count"), help=t("配合 --all: 最多启动的卡数", "with --all: maximum number of tasks to start"))
     start_parser.add_argument("--agent", choices=AGENT_NAMES, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
     start_parser.add_argument("--model", metavar=t("模型", "model"), help=t("覆盖注册表中的默认模型", "override the registered default model"))
     start_parser.add_argument(

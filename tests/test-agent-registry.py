@@ -264,6 +264,73 @@ class KanbanIntegrationTest(unittest.TestCase):
         self.run_command("start", first_id)
         self.run_command("start", second_id)
 
+    # ---- 批量启动: start --all / --limit ----
+
+    def test_start_all_launches_every_todo_card(self) -> None:
+        self.fake_agent("codex")
+        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "0"
+        ids = [self.make_todo(f"batch-{n}")[0] for n in range(3)]
+
+        result = self.run_command("start", "--all")
+
+        self.assertIn("成功 3/3", result.stdout)
+        for task_id in ids:
+            self.assertTrue((self.root / "working" / f"{task_id}.md").exists())
+            self.assertFalse((self.root / "todo" / f"{task_id}.md").exists())
+
+    def test_start_all_with_limit_starts_only_n(self) -> None:
+        self.fake_agent("codex")
+        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "0"
+        ids = [self.make_todo(f"limit-{n}")[0] for n in range(4)]
+
+        result = self.run_command("start", "--all", "--limit", "2")
+
+        self.assertIn("成功 2/2", result.stdout)
+        self.assertTrue((self.root / "working" / f"{ids[0]}.md").exists())
+        self.assertTrue((self.root / "working" / f"{ids[1]}.md").exists())
+        self.assertTrue((self.root / "todo" / f"{ids[2]}.md").exists())
+        self.assertTrue((self.root / "todo" / f"{ids[3]}.md").exists())
+
+    def test_start_all_respects_concurrency_cap(self) -> None:
+        self.fake_agent("codex")
+        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "2"
+        ids = [self.make_todo(f"cap-{n}")[0] for n in range(3)]
+
+        self.run_command("start", "--all")
+
+        self.assertTrue((self.root / "working" / f"{ids[0]}.md").exists())
+        self.assertTrue((self.root / "working" / f"{ids[1]}.md").exists())
+        self.assertTrue((self.root / "todo" / f"{ids[2]}.md").exists())
+
+    def test_start_all_with_no_capacity_reports_error(self) -> None:
+        self.fake_agent("codex")
+        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "1"
+        first_id, _ = self.make_todo("full-a")
+        second_id, _ = self.make_todo("full-b")
+        self.run_command("start", first_id)
+
+        result = self.run_command("start", "--all", succeeds=False)
+
+        self.assertIn("无可用并发名额", result.stderr)
+        self.assertTrue((self.root / "todo" / f"{second_id}.md").exists())
+
+    def test_start_all_rejects_foreground_launcher(self) -> None:
+        self.fake_agent("codex")
+        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "0"
+        self.make_todo("fg-all")
+
+        result = self.run_command("start", "--all", "--launcher", "foreground", succeeds=False)
+
+        self.assertIn("只支持 tmux launcher", result.stderr)
+
+    def test_start_all_with_empty_todo_reports_error(self) -> None:
+        self.fake_agent("codex")
+        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "0"
+
+        result = self.run_command("start", "--all", succeeds=False)
+
+        self.assertIn("todo 中没有可启动的任务", result.stderr)
+
 
 if __name__ == "__main__":
     unittest.main()
