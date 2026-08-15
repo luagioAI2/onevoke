@@ -112,7 +112,7 @@ def chat_completion(
             },
         )
         try:
-            with urllib.request.urlopen(request, timeout=300) as response:
+            with urllib.request.urlopen(request, timeout=180) as response:
                 raw = response.read().decode("utf-8")
                 return json.loads(raw)
         except urllib.error.HTTPError as error:
@@ -123,8 +123,19 @@ def chat_completion(
             delay = RETRY_BASE_SECONDS * (2 ** (attempt - 1)) * (0.5 + ((time.time_ns() % 1000) / 1000))
             print(f"llm-agent: HTTP {error.code}, {delay:.1f}s 后重试 ({attempt}/{attempts})", file=sys.stderr)
             time.sleep(delay)
+        except TimeoutError as error:
+            # DeepSeek 响应慢会触发 socket 读超时; 超时按可重试错误处理, 不直接崩.
+            if attempt >= attempts:
+                raise AdapterError(f"API 请求持续超时, 已重试 {attempts} 次") from error
+            delay = RETRY_BASE_SECONDS * (2 ** (attempt - 1)) * (0.5 + ((time.time_ns() % 1000) / 1000))
+            print(f"llm-agent: API 请求超时, {delay:.1f}s 后重试 ({attempt}/{attempts})", file=sys.stderr)
+            time.sleep(delay)
         except urllib.error.URLError as error:
-            raise AdapterError(f"无法连接 API: {error.reason}")
+            if attempt >= attempts:
+                raise AdapterError(f"无法连接 API (重试 {attempts} 次): {error.reason}") from error
+            delay = RETRY_BASE_SECONDS * (2 ** (attempt - 1)) * (0.5 + ((time.time_ns() % 1000) / 1000))
+            print(f"llm-agent: 连接 API 失败: {error.reason}, {delay:.1f}s 后重试 ({attempt}/{attempts})", file=sys.stderr)
+            time.sleep(delay)
     raise AdapterError("重试耗尽")  # pragma: no cover
 
 
@@ -404,14 +415,15 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     exec_parser = sub.add_parser("exec", help="执行任务 (工具循环)")
-    exec_parser.add_argument("--provider", required=True)
+    # provider 不设为 required: 薄壳 (deepseek/glm) 已固定 provider, 由 main_with_args 兜底.
+    exec_parser.add_argument("--provider")
     exec_parser.add_argument("--model")
     exec_parser.add_argument("--effort", default="medium")
     exec_parser.add_argument("--cwd")
     exec_parser.add_argument("prompt", nargs=argparse.REMAINDER)
 
     review_parser = sub.add_parser("review", help="只读审核")
-    review_parser.add_argument("--provider", required=True)
+    review_parser.add_argument("--provider")
     review_parser.add_argument("--model")
     review_parser.add_argument("--effort", default="high")
     review_parser.add_argument("--cwd", required=True)
