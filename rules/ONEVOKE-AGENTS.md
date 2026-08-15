@@ -10,6 +10,7 @@
 
 | 分册 | 何时读 |
 |---|---|
+| `~/.agents/SUMMARY.md` | 每个任务开始时 (自动生成的摘要, 读完再按需读分册; `onevoke compile-rules` 重新生成) |
 | `~/.agents/BASE-RULES.md` | 每个任务开始时 |
 | `~/.agents/GIT-RULES.md` | 建分支, 提交, push, 审核, 集成前 |
 | `~/.agents/REVIEW-RULES.md` | 触发审核前 |
