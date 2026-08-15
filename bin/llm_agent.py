@@ -309,6 +309,24 @@ def system_prompt(mode: str, cwd: Path, model: str, effort: str) -> str:
 # 循环
 # ---------------------------------------------------------------------------
 
+def _progress(text: str) -> None:
+    """过程日志打到 stderr: tmux 窗口 / QuickTUI 可见, 不污染 stdout 最终结果."""
+    if os.environ.get("LLM_AGENT_QUIET"):
+        return
+    print(f"llm-agent: {text}", file=sys.stderr, flush=True)
+
+
+def _summarize_arguments(arguments: dict[str, Any]) -> str:
+    """工具参数摘要: 路径/命令保留, 大段正文截断."""
+    parts: list[str] = []
+    for key, value in arguments.items():
+        text = str(value)
+        if len(text) > 80:
+            text = text[:77] + "…"
+        parts.append(f"{key}={text}")
+    return " ".join(parts) or "(无参数)"
+
+
 def run_loop(
     provider: str,
     model: str,
@@ -322,6 +340,7 @@ def run_loop(
         {"role": "system", "content": system_prompt(mode, cwd, model, effort)},
         {"role": "user", "content": prompt},
     ]
+    _progress(f"启动 {mode} 会话 (provider={provider} model={model} effort={effort} cwd={cwd})")
     for _turn in range(1, MAX_TURNS + 1):
         response = chat_completion(provider, model, messages, tools)
         try:
@@ -331,11 +350,18 @@ def run_loop(
         content = message.get("content") or ""
         tool_calls = message.get("tool_calls") or []
 
+        if content:
+            _progress(f"[回合 {_turn}] 模型: {content[:150]}")
+        else:
+            _progress(f"[回合 {_turn}] (模型请求工具)")
+
         if not tool_calls:
             if mode == "review":
+                _progress("[完成] 审核结束")
                 return content
             # exec 模式: 模型没调 finished 就结束视为未完成.
             messages.append({"role": "assistant", "content": content})
+            _progress("[完成] 模型直接结束 (未调用 finished)")
             return content
 
         messages.append({"role": "assistant", "content": content, "tool_calls": tool_calls})
@@ -346,9 +372,8 @@ def run_loop(
             except json.JSONDecodeError:
                 arguments = {}
             if name == "finished" and mode == "exec":
-                print(content or "", end="", flush=True)
                 final = str(arguments.get("message", content or ""))
-                print("\n" + final if content else final, file=sys.stderr)
+                _progress("[完成] " + final[:300])
                 return final
             if mode == "review" and name in ("write_file", "edit_file", "run_command", "finished"):
                 result_text = "错误: review 模式禁止写操作和命令执行, 只允许只读工具 (read_file/list_dir/grep)"
@@ -357,13 +382,13 @@ def run_loop(
                     result_text = _tool_result_text(name, arguments, cwd)
                 except (OSError, subprocess.TimeoutExpired) as error:
                     result_text = f"错误: {error}"
+            _progress(f"[工具] {name} {_summarize_arguments(arguments)}")
+            _progress(f"[结果] {result_text[:200]}")
             messages.append({
                 "role": "tool",
                 "tool_call_id": call.get("id", ""),
                 "content": result_text,
             })
-        if mode == "review":
-            print(content or "", end="", flush=True)
     raise AdapterError(f"超过最大轮数 {MAX_TURNS}, 任务未完成")
 
 
