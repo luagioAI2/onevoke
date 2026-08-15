@@ -973,13 +973,14 @@ def _start_one(
                     ))
                 key_env = f"export {key_name}={shlex.quote(key_value)}; "
             command = key_env + shlex.join(agent_argv)
-            # 会话结束后自动展示待验收清单, 并挂起窗口 (不随进程退出关闭),
-            # 让"等你确认"在终端/QuickTUI 里始终可见, 看完按任意键关闭.
+            # 会话结束后自动展示待验收清单, 并用 while 循环保活窗口:
+            # 不依赖按键 (QuickTUI 下 read 会因 EOF 退出导致窗口关闭),
+            # 窗口一直保留展示"等你确认", 看完用 tmux kill-window 或 QuickTUI 关闭.
             hook = (
                 f" ; echo; echo '{t('=== 会话结束, 检查待验收 ===', '=== session ended, check pending ===')}'; "
                 f"{shlex.quote(str(Path.home() / '.local' / 'bin' / 'kanban'))} pending; "
-                f"echo; echo '{t('(窗口保留, 按任意键关闭)', '(window kept open; press any key to close)')}'; "
-                f"read -n 1 -s"
+                f"echo; echo '{t('(窗口保留; 确认验收请运行 kanban finish <task-id>; 关闭本窗口用 tmux kill-window)', '(window kept open; confirm with kanban finish <task-id>; close with tmux kill-window)')}'; "
+                f"while true; do sleep 600; done"
             )
             command += hook
             result = subprocess.run(
