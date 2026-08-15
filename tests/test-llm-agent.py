@@ -105,6 +105,8 @@ class LlmAgentTest(unittest.TestCase):
         self.env["GLM_API_KEY"] = "test-key"
         self.env["LLM_AGENT_RETRY_ATTEMPTS"] = "5"
         self.env["LLM_AGENT_RETRY_BASE_SECONDS"] = "0.01"
+        # 默认跳过对话确认, 让既有 exec 测试不被 stdin 阻塞.
+        self.env["LLM_AGENT_NO_CONFIRM"] = "1"
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -246,6 +248,84 @@ class LlmAgentTest(unittest.TestCase):
 
         self.assertIn("持续返回 HTTP 429", result.stderr)
         self.assertEqual(5, len(server.requests))
+
+    # ---- 对话确认 (原始交互式确认) ----
+
+    def _make_working_card(self, work: Path, task_id: str) -> Path:
+        board = work / "kanban"
+        for state in ("backlog", "todo", "working", "done", "archived", "trash"):
+            (board / state).mkdir(parents=True)
+        card = board / "working" / f"{task_id}.md"
+        card.write_text(
+            "# 确认测试\n\n- 类型: Feature\n- 创建时间: 2026-08-16 00:00\n"
+            "- 负责人: deepseek\n- 开始时间: 2026-08-16 00:01\n- 完成时间:\n"
+            "- 任务分支:\n- 结果:\n\n## 实施与验证\n\n已完成实现, 验证通过。\n\n"
+            "## 完成总结\n\n<填写>\n",
+            encoding="utf-8",
+        )
+        return card
+
+    def test_exec_confirm_accept_finishes_card(self) -> None:
+        work = self.root / "work"
+        work.mkdir()
+        task_id = "20260816-confirm-task"
+        self._make_working_card(work, task_id)
+        responses = [
+            completion_with_tool_calls([
+                tool_call("f1", "finished", {"message": "任务完成"}),
+            ]),
+        ]
+        self.env.pop("LLM_AGENT_NO_CONFIRM", None)
+        self.env["KANBAN_BIN"] = str(PROJECT_ROOT / "bin" / "kanban")
+        with FakeServer(responses) as server:
+            self.env["LLM_AGENT_BASE_URL"] = f"http://127.0.0.1:{server.port}"
+            result = subprocess.run(
+                [sys.executable, str(DEEPSEEK), "exec", "--provider", "deepseek",
+                 "--cwd", str(work), "--effort", "medium",
+                 f"执行 Kanban 任务 {task_id}. 完成工作"],
+                env=self.env,
+                text=True,
+                input="验收通过\n",
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertIn("请验收", result.stdout)
+        done = work / "kanban" / "done" / f"{task_id}.md"
+        self.assertTrue(done.exists(), "卡片应被自动 move done")
+        text = done.read_text(encoding="utf-8")
+        self.assertIn("- 结果: completed", text)
+        self.assertIn("用户验收通过", text)
+
+    def test_exec_confirm_reject_keeps_working(self) -> None:
+        work = self.root / "work"
+        work.mkdir()
+        task_id = "20260816-reject-task"
+        self._make_working_card(work, task_id)
+        responses = [
+            completion_with_tool_calls([
+                tool_call("f1", "finished", {"message": "完成"}),
+            ]),
+        ]
+        self.env.pop("LLM_AGENT_NO_CONFIRM", None)
+        self.env["KANBAN_BIN"] = str(PROJECT_ROOT / "bin" / "kanban")
+        with FakeServer(responses) as server:
+            self.env["LLM_AGENT_BASE_URL"] = f"http://127.0.0.1:{server.port}"
+            result = subprocess.run(
+                [sys.executable, str(DEEPSEEK), "exec", "--provider", "deepseek",
+                 "--cwd", str(work), "--effort", "medium",
+                 f"执行 Kanban 任务 {task_id}. 完成工作"],
+                env=self.env,
+                text=True,
+                input="否\n",
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertTrue((work / "kanban" / "working" / f"{task_id}.md").exists())
+        self.assertFalse((work / "kanban" / "done" / f"{task_id}.md").exists())
 
 
 if __name__ == "__main__":

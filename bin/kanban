@@ -896,7 +896,7 @@ def check_concurrency(config: dict, board: Board) -> None:
             f"已达到并发上限: working 中有 {working} 张卡, max_concurrent_tasks={limit} "
             f"(0 关闭限制); 先完成或归档部分任务再启动.",
             f"Concurrency limit reached: {working} tasks in working, "
-            f"max_concurrent_tasks={limit} (set 0 to disable); finish or archive tasks first.",
+            f"max_concurrent_tasks={limit} (set 0 to disable); complete or archive tasks first.",
         ))
 
 
@@ -973,18 +973,11 @@ def _start_one(
                     ))
                 key_env = f"export {key_name}={shlex.quote(key_value)}; "
             command = key_env + shlex.join(agent_argv)
-            # 会话结束后展示待验收清单, 并进入交互确认:
-            # 窗口里输入 1 / y / 验收通过 即执行 kanban finish; 之后保持交互 shell.
-            # 不再用 while 保活 (不读输入, 用户在窗口里敲字无效).
-            kanban_cmd = shlex.quote(str(Path.home() / ".local" / "bin" / "kanban"))
+            # llm-agent 会在任务完成后停在"对话确认"等待用户输入并自动收尾;
+            # 会话真正结束后窗口进入交互 shell, 供查看与关闭.
             hook = (
-                f" ; echo; echo '{t('=== 会话结束, 检查待验收 ===', '=== session ended, check pending ===')}'; "
-                f"{kanban_cmd} pending; "
-                f"echo; echo '{t('输入 1 / y / 验收通过 确认验收并收尾 (等价 kanban finish {entry.task_id})', 'type 1 / y / accept to confirm (same as kanban finish {entry.task_id})')}'; "
-                f"read -r -p '> ' __choice; "
-                f"if [ \"$__choice\" = \"1\" ] || [ \"$__choice\" = \"y\" ] || [ \"$__choice\" = \"Y\" ] || [ \"$__choice\" = \"验收通过\" ]; then "
-                f"{kanban_cmd} finish {entry.task_id}; fi; "
-                f"echo; echo '{t('窗口保留; 可输入 exit 退出', 'window kept open; type exit to close')}'; "
+                f" ; echo; echo '{t('=== 会话结束 ===', '=== session ended ===')}'; "
+                f"echo '{t('(窗口保留; 可输入 exit 关闭)', '(window kept open; type exit to close)')}'; "
                 f"exec bash"
             )
             command += hook
@@ -1081,7 +1074,7 @@ def command_start_all(
             f"无可用并发名额 (working={working}, max_concurrent_tasks={limit if limit > 0 else '无限'}); "
             f"先完成或归档部分任务, 或调大 max_concurrent_tasks.",
             f"No concurrency slots available (working={working}, max_concurrent_tasks={limit if limit > 0 else 'unlimited'}); "
-            f"finish or archive tasks first, or raise max_concurrent_tasks.",
+            f"complete or archive tasks first, or raise max_concurrent_tasks.",
         ))
 
     selected = todos[:available]
@@ -1119,127 +1112,6 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
             f"已启动: {entry.task_id}\tAgent={agent_name}\t窗口={window}",
             f"started: {entry.task_id}\tagent={agent_name}\twindow={window}",
         ))
-
-
-def finish_one(entry: Entry, root: Path, auto_summary: bool = True) -> None:
-    """用户确认收尾: 填结果 completed + 完成总结, 再 move done.
-
-    前置条件: 卡片在 working, 且「实施与验证」已填写 (Agent 已完成实现).
-    这是「用户验收确认」的机械化: 填卡与迁移由命令完成, 用户只确认.
-    """
-    text = read_document(entry)
-    result = result_from(text)
-    if result not in ("", None):
-        raise KanbanError(t(
-            f"卡片已填写结果: {result!r}; 无需再次收尾. 若要归档请用 move archived.",
-            f"Task already has a result: {result!r}; nothing to finish. Use move archived to archive.",
-        ))
-    implementation = section_body(text, "实施与验证") or ""
-    if not implementation or "<填写>" in implementation:
-        raise KanbanError(t(
-            f"卡片 {entry.task_id} 的「实施与验证」尚未填写, 不能收尾; "
-            f"确认 Agent 已完成实现后再运行 finish.",
-            f"Task {entry.task_id} has no implementation log; refusing to finish. "
-            f"Confirm the Agent completed the work first.",
-        ))
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M")
-    updated = re.sub(r"(?m)^- 结果:.*$", "- 结果: completed", text, count=1)
-    if auto_summary:
-        # 自动生成完成总结: 从实施与验证提炼首行 + 验收时间.
-        first_line = next(
-            (line.strip() for line in implementation.splitlines() if line.strip()),
-            "已实现并验证",
-        )
-        summary = f"用户验收通过 ({now}); 实施与验证: {first_line[:80]}"
-        summary_marker = "## 完成总结"
-        if summary_marker in updated:
-            updated = re.sub(
-                rf"(?m)^{re.escape(summary_marker)}\s*$",
-                f"{summary_marker}\n\n{summary}\n",
-                updated,
-                count=1,
-            )
-            # 清掉完成总结章节残留的 <填写> 占位符.
-            idx = updated.find(summary_marker)
-            if idx >= 0:
-                updated = updated[:idx] + updated[idx:].replace("<填写>", "", 1)
-        else:
-            updated += f"\n\n{summary_marker}\n\n{summary}\n"
-    if updated != text:
-        # 先落盘, move_entry 的 done 门禁才能读到结果与完成总结.
-        write_text_atomic(entry.document, updated, entry=entry)
-    move_entry(entry, root, "done")
-    print(t(f"已收尾: {entry.task_id} -> done", f"finished: {entry.task_id} -> done"))
-
-
-def command_pending(root: Path) -> None:
-    """列出待用户验收的卡: working 且「实施与验证」已填、结果为空.
-
-    这就是 Agent 干完活后"等你确认"的可见信号; 确认后跑 kanban finish.
-    """
-    board = load_board(root)
-    pending: list[Entry] = []
-    for entry in board.entries.values():
-        if entry.state != "working":
-            continue
-        text = read_document(entry)
-        result = result_from(text)
-        if result not in ("", None):
-            continue
-        implementation = section_body(text, "实施与验证") or ""
-        if implementation and "<填写>" not in implementation:
-            pending.append(entry)
-    pending.sort(key=lambda entry: entry.task_id)
-    if not pending:
-        print(t(
-            "没有待验收的任务 (working 中无已完成的卡).",
-            "No tasks awaiting acceptance.",
-        ))
-        return
-    print(t("待验收任务:", "Tasks awaiting acceptance:"))
-    for entry in pending:
-        title = title_from(read_document(entry))
-        print(f"  {entry.task_id}\t{title}")
-    print(t(
-        f"\n共 {len(pending)} 张; 确认后运行: kanban finish --all (或 kanban finish <task-id>)",
-        f"\n{len(pending)} total; confirm with: kanban finish --all (or kanban finish <task-id>)",
-    ))
-
-
-def command_finish(args: argparse.Namespace, root: Path) -> None:
-    board = load_board(root)
-    if getattr(args, "all", False):
-        targets = sorted(
-            (entry for entry in board.entries.values() if entry.state == "working"),
-            key=lambda entry: entry.task_id,
-        )
-        if not targets:
-            raise KanbanError(t("working 中没有任务", "No tasks in working"))
-        finished = 0
-        for entry in targets:
-            try:
-                finish_one(entry, root)
-                finished += 1
-            except KanbanError as error:
-                print(t(f"跳过: {entry.task_id}: {error}", f"skipped: {entry.task_id}: {error}"), file=sys.stderr)
-        print(t(
-            f"批量收尾完成: {finished}/{len(targets)} 张卡进入 done",
-            f"batch finish done: {finished}/{len(targets)} tasks moved to done",
-        ))
-        return
-    if not args.task:
-        raise KanbanError(t(
-            "finish 需要任务 ID, 或用 --all 批量收尾全部 working 卡",
-            "finish requires a task ID, or use --all to finish all working tasks",
-        ))
-    entry = locate(board, args.task)
-    if entry.state != "working":
-        raise KanbanError(t(
-            f"只能收尾 working 任务: {entry.task_id} 当前位于 {entry.state}",
-            f"Only working tasks can be finished: {entry.task_id} is in {entry.state}",
-        ))
-    finish_one(entry, root)
 
 
 def command_check(root: Path) -> int:
@@ -1303,12 +1175,6 @@ def parser() -> argparse.ArgumentParser:
         "--launcher", choices=("tmux", "foreground"), help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
 
-    finish_parser = commands.add_parser("finish", help=t("用户确认收尾: 填完成记录并移入 done", "confirm a working task: fill completion and move to done"))
-    finish_parser.add_argument("task", nargs="?", metavar=t("任务", "task"))
-    finish_parser.add_argument("--all", action="store_true", help=t("批量收尾全部 working 卡", "finish all working tasks"))
-
-    commands.add_parser("pending", help=t("列出待用户验收的任务", "list tasks awaiting user acceptance"))
-
     commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
     return result
 
@@ -1335,10 +1201,6 @@ def main() -> int:
             command_pick(args, root)
         elif args.command == "start":
             command_start(args, root)
-        elif args.command == "finish":
-            command_finish(args, root)
-        elif args.command == "pending":
-            command_pending(root)
         elif args.command == "check":
             return command_check(root)
         return 0

@@ -335,73 +335,6 @@ class KanbanIntegrationTest(unittest.TestCase):
 
     # ---- 用户确认收尾: finish ----
 
-    def make_working_with_impl(self, slug: str) -> str:
-        """建卡 -> start 进 working -> 填「实施与验证」."""
-        self.fake_agent("codex")
-        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "0"
-        task_id, _ = self.make_todo(slug)
-        self.run_command("start", task_id)
-        card = self.root / "working" / f"{task_id}.md"
-        text = card.read_text(encoding="utf-8")
-        text = text.replace(
-            "## 实施与验证\n\n<填写>\n",
-            "## 实施与验证\n\n已完成实现, 验证通过。\n",
-            1,
-        )
-        card.write_text(text, encoding="utf-8")
-        return task_id
-
-    def test_finish_moves_working_task_to_done(self) -> None:
-        task_id = self.make_working_with_impl("finish-one")
-
-        result = self.run_command("finish", task_id)
-
-        self.assertIn(f"已收尾: {task_id}", result.stdout)
-        card = self.root / "done" / f"{task_id}.md"
-        self.assertTrue(card.exists())
-        text = card.read_text(encoding="utf-8")
-        self.assertIn("- 结果: completed", text)
-        self.assertIn("用户验收通过", text)
-
-    def test_finish_rejects_non_working_task(self) -> None:
-        task_id, _ = self.make_todo("finish-todo")
-        result = self.run_command("finish", task_id, succeeds=False)
-        self.assertIn("只能收尾 working 任务", result.stderr)
-
-    def test_finish_requires_implementation_log(self) -> None:
-        self.fake_agent("codex")
-        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "0"
-        task_id, _ = self.make_todo("finish-noimpl")
-        self.run_command("start", task_id)  # working, 但实施与验证仍是 <填写>
-
-        result = self.run_command("finish", task_id, succeeds=False)
-
-        self.assertIn("尚未填写", result.stderr)
-        self.assertTrue((self.root / "working" / f"{task_id}.md").exists())
-
-    def test_finish_all_finishes_all_working_cards(self) -> None:
-        first = self.make_working_with_impl("finish-batch-a")
-        second = self.make_working_with_impl("finish-batch-b")
-
-        result = self.run_command("finish", "--all")
-
-        self.assertIn("批量收尾完成: 2/2", result.stdout)
-        for task_id in (first, second):
-            self.assertTrue((self.root / "done" / f"{task_id}.md").exists())
-
-    def test_finish_all_skips_cards_without_impl(self) -> None:
-        first = self.make_working_with_impl("finish-skip-a")
-        self.fake_agent("codex")
-        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "0"
-        second, _ = self.make_todo("finish-skip-b")
-        self.run_command("start", second)  # working, 但无实施与验证
-
-        result = self.run_command("finish", "--all")
-
-        self.assertIn("批量收尾完成: 1/2", result.stdout)
-        self.assertTrue((self.root / "done" / f"{first}.md").exists())
-        self.assertTrue((self.root / "working" / f"{second}.md").exists())
-
     def test_start_api_agent_injects_key_env(self) -> None:
         self.fake_agent("deepseek")
         self.env["DEEPSEEK_API_KEY"] = "sk-test-key-123"
@@ -422,36 +355,6 @@ class KanbanIntegrationTest(unittest.TestCase):
 
         self.assertIn("DEEPSEEK_API_KEY", result.stderr)
         self.assertTrue((self.root / "todo" / f"{task_id}.md").exists())
-
-    # ---- 待验收可见性: pending ----
-
-    def test_pending_lists_working_cards_with_impl(self) -> None:
-        task_id = self.make_working_with_impl("pending-impl")
-
-        result = self.run_command("pending")
-
-        self.assertIn(task_id, result.stdout)
-        self.assertIn("待验收任务", result.stdout)
-
-    def test_pending_ignores_working_cards_without_impl(self) -> None:
-        self.fake_agent("codex")
-        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "0"
-        task_id, _ = self.make_todo("pending-noimpl")
-        self.run_command("start", task_id)  # working, 但实施与验证仍为 <填写>
-
-        result = self.run_command("pending")
-
-        self.assertNotIn(task_id, result.stdout)
-        self.assertIn("没有待验收的任务", result.stdout)
-
-    def test_pending_ignores_finished_cards(self) -> None:
-        task_id = self.make_working_with_impl("pending-done")
-        self.run_command("finish", task_id)
-
-        result = self.run_command("pending")
-
-        self.assertNotIn(task_id, result.stdout)
-        self.assertIn("没有待验收的任务", result.stdout)
 
 
 if __name__ == "__main__":

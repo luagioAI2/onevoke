@@ -31,8 +31,6 @@ kanban new [--large] <feature|bug|chore|research> <slug> <title...>
 kanban move <task-id> <todo|working|done|archived|trash>
 kanban pick [task-id]
 kanban start [--all] [--limit N] [--agent codex|claude|grok|deepseek|glm] [--model <模型>] [--launcher tmux|foreground] [task-id]
-kanban pending
-kanban finish [--all] [task-id]
 kanban check
 ```
 
@@ -45,8 +43,6 @@ kanban check
 - `start` 默认使用 Agent 的免确认模式. launcher 默认取 Onevoke 配置, `--launcher` 只覆盖本次. 两种模式的 cwd 都是项目根: `tmux` 只在当前 session 建 `kb-<任务标题>` window, 不建 session; `foreground` 要求三个标准流都是 TTY 并等待 Agent 退出.
 - `start` 按配置 `max_concurrent_tasks` 限制 `working/` 并发卡数 (0 关闭, 默认 3), 达到上限时拒绝启动并提示; 环境变量 `KANBAN_MAX_CONCURRENT_TASKS` 可临时覆盖.
 - `start` 的 prompt 引导执行 Agent 先读 `~/.agents/SUMMARY.md` (存在时) 和项目 `.onevoke/context.md` (存在时), 再读分册和卡片, 减少重复探索; 任务组卡片还会提示复用已完成前置卡的「完成总结」.
-- `pending` 列出待用户验收的卡: `working/` 中「实施与验证」已填且 `结果:` 为空. 这是 CLI 场景下"验收请求"的可见信号; 没有待验收卡时输出提示.
-- `finish` 是用户验收确认的机械化: 填 `结果: completed` 和「完成总结」后执行 `move done`, 填卡与迁移由命令完成, 用户只确认. `finish --all` 批量收尾全部可收尾的 `working` 卡, 未满足条件的卡跳过并说明. 前置校验: 卡片必须在 `working/`, 且「实施与验证」已填 (确认 Agent 已完成实现).
 - `check` 列出全部无效入口并以非零退出. 其他命令忽略无关的无效入口, 只在目标任务违规时失败; 状态目录缺失或不可写时全部失败.
 - 命令只做结构和机械校验; 授权, 依赖, 验收和终止理由由 Agent 按本文件判断.
 
@@ -219,8 +215,8 @@ kanban move <task-id> working
 ```
 
 - 合回时机取 `~/.agents/ONEVOKE-AGENTS.md`「看板任务完成」. 默认先报告并等用户验收; 未确认前不集成, 不清理, 卡片留 `working/`. 15 分钟超时不适用于验收或集成确认.
-- 验收确认有两种等价方式, 都由用户发起: (1) **对话确认** — 在需求会话中对主 Agent 说"验收通过", 由 Agent 填完成记录并 `move done`; (2) **命令确认** — 运行 `kanban pending` 查看待验收卡, 确认后运行 `kanban finish [--all] [task-id]`, 由命令填 `结果: completed` 和「完成总结」并 `move done`. CLI 拉起的执行 Agent 是非交互进程, 干完活把验收请求写入卡片「实施与验证」末尾即退出, 卡片停在 `working/` 等确认; 此时"验收请求"的可见信号是 `kanban pending` 的输出.
-- 实现, 验证记录, 必要审核, 用户验收及适用的集成清理全部完成后, 才可填写完成总结或 `report.md` 和 `结果: completed`, 再执行 `kanban move <task-id> done` (或由 `kanban finish` 代填) 和 `kanban check`. 非代码任务的不适用项写 `N/A`.
+- 验收确认是对话式交互, 由用户发起: 执行 Agent 完成任务后, 在会话/窗口里询问用户是否验收, 用户明确回复"验收通过" (或等价确认词) 后, Agent 填 `结果: completed` 和「完成总结」并 `move done`, 再发完成报告. 用户未确认前卡片留 `working/`, 不集成不清理. 用户拒绝时卡片保留 `working/` 并记录原因.
+- 实现, 验证记录, 必要审核, 用户验收及适用的集成清理全部完成后, 才可填写完成总结或 `report.md` 和 `结果: completed`, 再执行 `kanban move <task-id> done` 和 `kanban check`. 非代码任务的不适用项写 `N/A`.
 
 ## 完成报告
 

@@ -470,7 +470,11 @@ def main_with_args(args: argparse.Namespace, provider: str | None) -> int:
                 die("exec 需要任务 prompt")
             final = run_loop(provider, model, effort, cwd, prompt, "exec")
             print(final)
-            return 0
+            # 原始交互式确认: 任务做完不退出, 在窗口里等用户验收,
+            # 确认后自动填卡收尾 (move done), 不需要 pending/finish 命令.
+            if os.environ.get("LLM_AGENT_NO_CONFIRM"):
+                return 0
+            return confirm_and_finish(cwd, prompt)
         if args.command == "review":
             prompt_file = Path(args.prompt_file)
             if not prompt_file.is_file():
@@ -484,6 +488,86 @@ def main_with_args(args: argparse.Namespace, provider: str | None) -> int:
         die(str(error))
     except KeyboardInterrupt:
         die("用户取消")
+
+
+# ---------------------------------------------------------------------------
+# 对话确认 (原始 Onevoke 交互式确认的适配)
+# ---------------------------------------------------------------------------
+
+_CONFIRM_WORDS = ("验收通过", "确认", "验收", "y", "Y", "1", "accept", "ok")
+_REJECT_WORDS = ("否", "n", "N", "0", "拒绝", "reject", "cancel")
+_TASK_ID_RE = re.compile(r"([0-9]{8}-[a-z0-9]+(?:-[a-z0-9]+)*-task)")
+
+
+def _fill_completion_and_move(cwd: Path, task_id: str) -> int:
+    """确认后自动收尾: 填 结果: completed + 完成总结, 再 move done."""
+    kanban_bin = os.environ.get("KANBAN_BIN", str(Path.home() / ".local" / "bin" / "kanban"))
+    card = cwd / "kanban" / "working" / f"{task_id}.md"
+    if not card.is_file():
+        print(f"llm-agent: 找不到工作卡 {card}; 跳过自动收尾 (可手动 kanban move {task_id} done)", file=sys.stderr)
+        return 1
+    try:
+        text = card.read_text(encoding="utf-8")
+    except OSError as error:
+        print(f"llm-agent: 读取卡片失败: {error}", file=sys.stderr)
+        return 1
+    updated = re.sub(r"(?m)^- 结果:.*$", "- 结果: completed", text, count=1)
+    summary_marker = "## 完成总结"
+    if summary_marker in updated:
+        updated = re.sub(
+            rf"(?m)^{re.escape(summary_marker)}\s*$",
+            f"{summary_marker}\n\n用户验收通过。\n",
+            updated,
+            count=1,
+        )
+        idx = updated.find(summary_marker)
+        if idx >= 0:
+            updated = updated[:idx] + updated[idx:].replace("<填写>", "", 1)
+    else:
+        updated += f"\n\n{summary_marker}\n\n用户验收通过。\n"
+    try:
+        card.write_text(updated, encoding="utf-8")
+    except OSError as error:
+        print(f"llm-agent: 写入卡片失败: {error}", file=sys.stderr)
+        return 1
+    result = subprocess.run(
+        [kanban_bin, "move", task_id, "done"],
+        cwd=str(cwd),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        print(f"llm-agent: move done 失败: {result.stderr.strip()}", file=sys.stderr)
+        return 1
+    print(f"\n已完成: {task_id} -> done")
+    return 0
+
+
+def confirm_and_finish(cwd: Path, prompt: str) -> int:
+    """在窗口里等待用户确认, 收到确认词后自动收尾 (原始对话式确认)."""
+    match = _TASK_ID_RE.search(prompt)
+    task_id = match.group(1) if match else ""
+    print("\n" + "=" * 24, flush=True)
+    print("任务已完成, 请验收:", flush=True)
+    print("  输入: 验收通过 / 确认 / y   → 确认并自动收尾 (move done)", flush=True)
+    print("  输入: 否 / n                → 拒绝, 卡片保留在 working", flush=True)
+    while True:
+        try:
+            answer = input("> ").strip()
+        except EOFError:
+            print("llm-agent: (无输入, 卡片保留在 working, 可稍后手动收尾)", file=sys.stderr)
+            return 0
+        if answer in _CONFIRM_WORDS:
+            break
+        if answer in _REJECT_WORDS:
+            print("已记录: 用户未确认, 卡片保留在 working。")
+            return 0
+        print("请重新输入 (确认: 验收通过/确认/y; 拒绝: 否/n)")
+    if not task_id:
+        print("llm-agent: 无法从任务 prompt 识别任务 ID, 跳过自动收尾", file=sys.stderr)
+        return 1
+    return _fill_completion_and_move(cwd, task_id)
 
 
 if __name__ == "__main__":
