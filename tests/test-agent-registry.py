@@ -400,6 +400,36 @@ class KanbanIntegrationTest(unittest.TestCase):
         self.assertTrue((self.root / "done" / f"{first}.md").exists())
         self.assertTrue((self.root / "working" / f"{second}.md").exists())
 
+    # ---- 待验收可见性: pending ----
+
+    def test_pending_lists_working_cards_with_impl(self) -> None:
+        task_id = self.make_working_with_impl("pending-impl")
+
+        result = self.run_command("pending")
+
+        self.assertIn(task_id, result.stdout)
+        self.assertIn("待验收任务", result.stdout)
+
+    def test_pending_ignores_working_cards_without_impl(self) -> None:
+        self.fake_agent("codex")
+        self.env["KANBAN_MAX_CONCURRENT_TASKS"] = "0"
+        task_id, _ = self.make_todo("pending-noimpl")
+        self.run_command("start", task_id)  # working, 但实施与验证仍为 <填写>
+
+        result = self.run_command("pending")
+
+        self.assertNotIn(task_id, result.stdout)
+        self.assertIn("没有待验收的任务", result.stdout)
+
+    def test_pending_ignores_finished_cards(self) -> None:
+        task_id = self.make_working_with_impl("pending-done")
+        self.run_command("finish", task_id)
+
+        result = self.run_command("pending")
+
+        self.assertNotIn(task_id, result.stdout)
+        self.assertIn("没有待验收的任务", result.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

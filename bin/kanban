@@ -1144,6 +1144,40 @@ def finish_one(entry: Entry, root: Path, auto_summary: bool = True) -> None:
     print(t(f"已收尾: {entry.task_id} -> done", f"finished: {entry.task_id} -> done"))
 
 
+def command_pending(root: Path) -> None:
+    """列出待用户验收的卡: working 且「实施与验证」已填、结果为空.
+
+    这就是 Agent 干完活后"等你确认"的可见信号; 确认后跑 kanban finish.
+    """
+    board = load_board(root)
+    pending: list[Entry] = []
+    for entry in board.entries.values():
+        if entry.state != "working":
+            continue
+        text = read_document(entry)
+        result = result_from(text)
+        if result not in ("", None):
+            continue
+        implementation = section_body(text, "实施与验证") or ""
+        if implementation and "<填写>" not in implementation:
+            pending.append(entry)
+    pending.sort(key=lambda entry: entry.task_id)
+    if not pending:
+        print(t(
+            "没有待验收的任务 (working 中无已完成的卡).",
+            "No tasks awaiting acceptance.",
+        ))
+        return
+    print(t("待验收任务:", "Tasks awaiting acceptance:"))
+    for entry in pending:
+        title = title_from(read_document(entry))
+        print(f"  {entry.task_id}\t{title}")
+    print(t(
+        f"\n共 {len(pending)} 张; 确认后运行: kanban finish --all (或 kanban finish <task-id>)",
+        f"\n{len(pending)} total; confirm with: kanban finish --all (or kanban finish <task-id>)",
+    ))
+
+
 def command_finish(args: argparse.Namespace, root: Path) -> None:
     board = load_board(root)
     if getattr(args, "all", False):
@@ -1244,6 +1278,8 @@ def parser() -> argparse.ArgumentParser:
     finish_parser.add_argument("task", nargs="?", metavar=t("任务", "task"))
     finish_parser.add_argument("--all", action="store_true", help=t("批量收尾全部 working 卡", "finish all working tasks"))
 
+    commands.add_parser("pending", help=t("列出待用户验收的任务", "list tasks awaiting user acceptance"))
+
     commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
     return result
 
@@ -1272,6 +1308,8 @@ def main() -> int:
             command_start(args, root)
         elif args.command == "finish":
             command_finish(args, root)
+        elif args.command == "pending":
+            command_pending(root)
         elif args.command == "check":
             return command_check(root)
         return 0
