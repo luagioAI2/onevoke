@@ -30,6 +30,7 @@ from onevoke_config import (
 from agent_registry import (
     AgentRegistryError,
     agent_launch_args,
+    agent_spec,
     task_effort as registry_task_effort,
     task_model as registry_task_model,
 )
@@ -958,7 +959,20 @@ def _start_one(
     try:
         write_text_atomic(moved.document, updated, entry=moved)
         if launcher == "tmux":
-            command = shlex.join(agent_argv)
+            # tmux 新窗口环境继承自 tmux server, 不继承启动命令所在 shell 的 export;
+            # 必须把 API key 显式拼进窗口命令, 否则 API 类 Agent 会 401.
+            spec = agent_spec(agent_name)
+            key_env = ""
+            if spec["kind"] == "api":
+                key_name = agent_name.upper() + "_API_KEY"
+                key_value = os.environ.get(key_name)
+                if not key_value:
+                    raise KanbanError(t(
+                        f"Agent {agent_name} 需要 {key_name} 环境变量; 请先 export {key_name}=... 再 kanban start.",
+                        f"Agent {agent_name} requires {key_name}; export {key_name}=... before kanban start.",
+                    ))
+                key_env = f"export {key_name}={shlex.quote(key_value)}; "
+            command = key_env + shlex.join(agent_argv)
             # 会话结束后自动展示待验收清单, 并挂起窗口 (不随进程退出关闭),
             # 让"等你确认"在终端/QuickTUI 里始终可见, 看完按任意键关闭.
             hook = (

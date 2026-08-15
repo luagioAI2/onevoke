@@ -158,6 +158,8 @@ class KanbanIntegrationTest(unittest.TestCase):
         self.env["ONEVOKE_LANG"] = "zh"
         self.env["TMUX"] = "/tmp/fake-tmux,1,0"
         self.env["TMUX_PANE"] = "%1"
+        self.env["DEEPSEEK_API_KEY"] = "sk-test-deepseek"
+        self.env["GLM_API_KEY"] = "sk-test-glm"
         self.install_tmux_fake()
 
     def tearDown(self) -> None:
@@ -399,6 +401,27 @@ class KanbanIntegrationTest(unittest.TestCase):
         self.assertIn("批量收尾完成: 1/2", result.stdout)
         self.assertTrue((self.root / "done" / f"{first}.md").exists())
         self.assertTrue((self.root / "working" / f"{second}.md").exists())
+
+    def test_start_api_agent_injects_key_env(self) -> None:
+        self.fake_agent("deepseek")
+        self.env["DEEPSEEK_API_KEY"] = "sk-test-key-123"
+        task_id, _ = self.make_todo("key-inject")
+
+        self.run_command("start", "--agent", "deepseek", task_id)
+
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn("export DEEPSEEK_API_KEY=sk-test-key-123", command)
+        self.assertIn("exec", command)
+
+    def test_start_api_agent_requires_key(self) -> None:
+        self.fake_agent("deepseek")
+        self.env.pop("DEEPSEEK_API_KEY", None)
+        task_id, _ = self.make_todo("key-missing")
+
+        result = self.run_command("start", "--agent", "deepseek", task_id, succeeds=False)
+
+        self.assertIn("DEEPSEEK_API_KEY", result.stderr)
+        self.assertTrue((self.root / "todo" / f"{task_id}.md").exists())
 
     # ---- 待验收可见性: pending ----
 
