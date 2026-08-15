@@ -959,6 +959,15 @@ def _start_one(
         write_text_atomic(moved.document, updated, entry=moved)
         if launcher == "tmux":
             command = shlex.join(agent_argv)
+            # 会话结束后自动展示待验收清单, 并挂起窗口 (不随进程退出关闭),
+            # 让"等你确认"在终端/QuickTUI 里始终可见, 看完按任意键关闭.
+            hook = (
+                f" ; echo; echo '{t('=== 会话结束, 检查待验收 ===', '=== session ended, check pending ===')}'; "
+                f"{shlex.quote(str(Path.home() / '.local' / 'bin' / 'kanban'))} pending; "
+                f"echo; echo '{t('(窗口保留, 按任意键关闭)', '(window kept open; press any key to close)')}'; "
+                f"read -n 1 -s"
+            )
+            command += hook
             result = subprocess.run(
                 [
                     tmux,
