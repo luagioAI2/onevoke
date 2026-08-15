@@ -28,6 +28,14 @@ from onevoke_config import (
     load_config,
     save_config,
 )
+from agent_registry import (
+    agent_label,
+    agent_spec,
+    memsearch_supported,
+    review_wrapper_name,
+    rules_mode,
+    rules_path,
+)
 
 apply_language_argument(sys.argv[1:])
 t = language_text
@@ -37,11 +45,10 @@ argparse._ = lambda message: t(ARGPARSE_ZH.get(message, message), message)
 COMMANDS = (
     "onevoke",
     "kanban",
-    "codex-review.sh",
-    "grok-review.sh",
+    *tuple(review_wrapper_name(name) for name in REVIEW_AGENTS),
     "merge-worktree-memory.py",
 )
-AGENT_LABELS = {"codex": "Codex", "claude": "Claude", "grok": "Grok"}
+AGENT_LABELS = {name: agent_label(name) for name in EXECUTION_AGENTS}
 MEMSEARCH_REPOSITORY = "https://github.com/zilliztech/memsearch.git"
 
 
@@ -100,7 +107,7 @@ def find_agents() -> dict[str, dict[str, str | bool | None]]:
             "version": agent_version(command) if command else None,
             "execution": True,
             "review": name in REVIEW_AGENTS,
-            "memsearch": name in ("codex", "claude"),
+            "memsearch": memsearch_supported(name),
         }
     return agents
 
@@ -234,12 +241,8 @@ def _merged_rules_present(text: str, entry: Path) -> bool:
 
 def rules_integration(agent: str) -> tuple[bool, str]:
     entry = Path.home() / ".agents" / "ONEVOKE-AGENTS.md"
-    if agent == "codex":
-        target = Path.home() / ".codex" / "AGENTS.md"
-    elif agent == "claude":
-        target = Path.home() / ".claude" / "CLAUDE.md"
-    else:
-        target = Path.home() / ".grok" / "AGENTS.md"
+    # 注册表路径形如 ~/.codex/AGENTS.md; 用 Path.home() 展开以兼容测试隔离.
+    target = Path.home() / rules_path(agent).lstrip("~/").lstrip("/")
     if not target.exists() and not target.is_symlink():
         return False, t(f"未发现 {target}", f"not found: {target}")
     try:
@@ -248,7 +251,7 @@ def rules_integration(agent: str) -> tuple[bool, str]:
         text = target.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         return False, t(f"无法读取 {target}", f"cannot read: {target}")
-    if agent == "claude":
+    if rules_mode(agent) == "import":
         integrated = _claude_rules_import_present(text, entry)
     else:
         integrated = _merged_rules_present(text, entry)
@@ -364,7 +367,7 @@ def validate_configured_resources(
                 )
             )
             continue
-        wrapper_name = f"{reviewer}-review.sh"
+        wrapper_name = review_wrapper_name(reviewer)
         if not shutil.which(wrapper_name):
             healthy = False
             warning(
@@ -508,8 +511,8 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
     if not execution_choices:
         raise OnevokeError(
             t(
-                "没有发现可用的 Agent (--version 须成功). 请先安装 Codex、Claude 或 Grok.",
-                "No usable Agent found (--version must succeed). Install Codex, Claude, or Grok first.",
+                f"没有发现可用的 Agent (--version 须成功). 请安装 {', '.join(AGENT_LABELS.values())} 之一.",
+                f"No usable Agent found (--version must succeed). Install one of: {', '.join(AGENT_LABELS.values())}.",
             )
         )
 
@@ -526,7 +529,10 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
         if agent_usable(agents[name])
     ]
     if not review_choices:
-        raise OnevokeError(t("没有发现可用 Reviewer. 请安装 Codex 或 Grok.", "No usable Reviewer found. Install Codex or Grok."))
+        raise OnevokeError(t(
+            f"没有发现可用 Reviewer. 请安装 {', '.join(AGENT_LABELS[name] for name in REVIEW_AGENTS)} 之一.",
+            f"No usable Reviewer found. Install one of: {', '.join(AGENT_LABELS[name] for name in REVIEW_AGENTS)}.",
+        ))
     for role in REVIEW_ROLES:
         previous = existing["reviewers"][role]
         config["reviewers"][role] = ask_choice(
@@ -570,7 +576,7 @@ def configure_welcome(existing: dict[str, Any]) -> dict[str, Any]:
             "Follow the README integration section; welcome will not overwrite your global rules file.",
         ), file=sys.stderr)
 
-    memory_agent = selected_agent if selected_agent in ("codex", "claude") else None
+    memory_agent = selected_agent if memsearch_supported(selected_agent) else None
     config["memsearch"]["enabled"] = False
     if memory_agent and ask_yes_no(
         t("是否使用 MemSearch?", "Use MemSearch?"), default=False
@@ -642,9 +648,10 @@ def command_review(arguments: list[str]) -> NoReturn:
         raise OnevokeError(t(f"不支持的 Reviewer 角色: {role}", f"Unsupported Reviewer role: {role}"))
     config = effective_config(load_config())
     reviewer = config["reviewers"][normalized]
-    wrapper = shutil.which(f"{reviewer}-review.sh")
+    wrapper_name = review_wrapper_name(reviewer)
+    wrapper = shutil.which(wrapper_name)
     if not wrapper:
-        raise OnevokeError(t(f"Reviewer wrapper 不在 PATH: {reviewer}-review.sh", f"Reviewer wrapper is not in PATH: {reviewer}-review.sh"))
+        raise OnevokeError(t(f"Reviewer wrapper 不在 PATH: {wrapper_name}", f"Reviewer wrapper is not in PATH: {wrapper_name}"))
     arguments[3] = normalized
     os.execv(wrapper, [wrapper, *arguments])
 
@@ -660,6 +667,157 @@ def print_config(config: dict[str, Any]) -> None:
     print(f"MemSearch: {t('启用', 'enabled') if effective['memsearch']['enabled'] else t('未启用', 'disabled')}")
 
 
+# ---------------------------------------------------------------------------
+# M3: token 节省 — 规则摘要与项目上下文缓存
+# ---------------------------------------------------------------------------
+
+SUMMARY_HEADING = re.compile(r"^#{2,4}\s+(.+)$")
+BULLET_RE = re.compile(r"^-\s+(.+)$")
+_SUMMARY_SKIP = {"SUMMARY.md", "AGENTS.md", "ONEVOKE-AGENTS.md", "CLAUDE.md"}
+_LINE_LIMIT = 100
+
+
+def _truncate(text: str) -> str:
+    return text if len(text) <= _LINE_LIMIT else text[:_LINE_LIMIT - 1] + "…"
+
+
+def summarize_rule_file(path: Path) -> list[str]:
+    """把单个分册压成摘要行: 标题 + 各小节前 2 条要点."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return [f"- (无法读取 {path.name})"]
+    lines: list[str] = []
+    section = ""
+    bullets = 0
+    for raw in text.splitlines():
+        heading = SUMMARY_HEADING.match(raw)
+        if heading:
+            if section and bullets == 0:
+                lines.append(f"  - ({t('无要点', 'no bullets')})")
+            section = heading.group(1).strip()
+            if section.startswith("## "):
+                continue
+            lines.append(f"- {_truncate(section)}")
+            bullets = 0
+            continue
+        bullet = BULLET_RE.match(raw)
+        if bullet and section:
+            if bullets < 2:
+                lines.append(f"  - {_truncate(bullet.group(1).strip())}")
+            bullets += 1
+    if section and bullets == 0:
+        lines.append(f"  - ({t('无要点', 'no bullets')})")
+    return lines
+
+
+def command_compile_rules(source: str | None) -> int:
+    """从规则目录生成 SUMMARY.md: 每个分册的标题 + 要点, 供任务 session 先读."""
+    rules_dir = Path(source).expanduser().resolve() if source else (Path.home() / ".agents")
+    if not rules_dir.is_dir():
+        raise OnevokeError(t(f"规则目录不存在: {rules_dir}", f"Rules directory does not exist: {rules_dir}"))
+    output_path = rules_dir / "SUMMARY.md"
+    out: list[str] = [
+        "# Onevoke 规则摘要",
+        "",
+        t(
+            "自动生成 (onevoke compile-rules). 任务开始时先读本摘要, 需要细节再读对应分册.",
+            "Auto-generated (onevoke compile-rules). Read this summary first, then the relevant booklet for details.",
+        ),
+        "",
+    ]
+    for rule in sorted(rules_dir.glob("*.md")):
+        if rule.name in _SUMMARY_SKIP:
+            continue
+        out.append(f"## {rule.name}")
+        out.append(f"- {t('入口', 'entry')}: `~/.agents/{rule.name}`")
+        out.extend(summarize_rule_file(rule))
+        out.append("")
+    output_path.write_text("\n".join(out), encoding="utf-8")
+    print(output_path)
+    return 0
+
+
+_INDEX_SKIP_DIRS = {
+    ".git", ".hg", ".svn", ".onevoke", "node_modules", "__pycache__",
+    "venv", ".venv", "dist", "build", "target", ".idea", ".vscode", ".tmp",
+}
+_INDEX_DEPTH = 4
+_INDEX_MAX_FILES = 400
+_INDEX_ENTRY_FILES = (
+    "README.md", "readme.md", "pyproject.toml", "package.json",
+    "Cargo.toml", "go.mod", "CMakeLists.txt", "Makefile", "AGENTS.md", "CLAUDE.md",
+)
+
+
+def command_index(project: str | None) -> int:
+    """生成 .onevoke/context.md: 目录树 + 入口文件摘要, 让新 session 免冷启动探索."""
+    root = Path(project).expanduser().resolve() if project else Path.cwd().resolve()
+    if not root.is_dir():
+        raise OnevokeError(t(f"项目目录不存在: {root}", f"Project directory does not exist: {root}"))
+    out_dir = root / ".onevoke"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    output_path = out_dir / "context.md"
+    out: list[str] = [
+        f"# {t('项目上下文', 'Project context')} ({root.name})",
+        "",
+        t(
+            "由 onevoke index 生成, 供任务 session 快速建立全局认识; 仓库结构变化后重新运行.",
+            "Generated by onevoke index; read to bootstrap a task session. Re-run after structure changes.",
+        ),
+        "",
+    ]
+
+    readme = root / "README.md"
+    if not readme.is_file():
+        readme = root / "readme.md"
+    if readme.is_file():
+        out.append(f"## README ({t('前 40 行', 'first 40 lines')})")
+        try:
+            lines = readme.read_text(encoding="utf-8").splitlines()[:40]
+            out.extend(f"> {_truncate(line)}" if line.strip() else ">" for line in lines)
+        except (OSError, UnicodeError):
+            out.append(f"> ({t('无法读取 README', 'cannot read README')})")
+        out.append("")
+
+    out.append(f"## {t('目录树', 'Directory tree')} (深度 {_INDEX_DEPTH})")
+    file_count = 0
+    for current, dirs, files in os.walk(root):
+        dirs[:] = sorted(
+            d for d in dirs
+            if d not in _INDEX_SKIP_DIRS and not d.startswith(".")
+        )
+        depth = len(Path(current).relative_to(root).parts)
+        if depth > _INDEX_DEPTH:
+            dirs[:] = []
+            continue
+        indent = "  " * depth
+        out.append(f"{indent}{Path(current).name}/")
+        for name in sorted(files):
+            if file_count >= _INDEX_MAX_FILES:
+                out.append(f"{indent}  … ({t('文件过多, 已截断', 'too many files, truncated')})")
+                break
+            file_count += 1
+            out.append(f"{indent}  {name}")
+    out.append("")
+
+    out.append(f"## {t('入口文件', 'Entry files')}")
+    for name in _INDEX_ENTRY_FILES:
+        entry = root / name
+        if not entry.is_file():
+            continue
+        try:
+            preview = " ".join(entry.read_text(encoding="utf-8").split())[:_LINE_LIMIT]
+        except (OSError, UnicodeError):
+            preview = f"({t('无法读取', 'cannot read')})"
+        out.append(f"- `{name}`: {_truncate(preview)}")
+    out.append("")
+
+    output_path.write_text("\n".join(out), encoding="utf-8")
+    print(output_path)
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     result = LocalizedArgumentParser(prog="onevoke", description=t("Onevoke 配置与诊断", "Onevoke configuration and diagnostics"))
     result.add_argument("--lang", choices=LANGUAGES, help=t("覆盖输出语言", "override the output language"))
@@ -671,6 +829,10 @@ def parser() -> argparse.ArgumentParser:
     config.add_argument("--json", action="store_true", help=t("以 JSON 输出", "output JSON"))
     review = commands.add_parser("review", help=t("按配置选择 Reviewer wrapper", "select a Reviewer wrapper from configuration"))
     review.add_argument("arguments", nargs=argparse.REMAINDER, metavar=t("参数", "arguments"))
+    compile_rules = commands.add_parser("compile-rules", help=t("从规则目录生成 SUMMARY.md 摘要", "generate SUMMARY.md from the rules directory"))
+    compile_rules.add_argument("--source", metavar=t("规则目录", "rules dir"), help=t("规则目录, 默认 ~/.agents", "rules directory; defaults to ~/.agents"))
+    index = commands.add_parser("index", help=t("生成 .onevoke/context.md 项目上下文", "generate .onevoke/context.md project context"))
+    index.add_argument("project", nargs="?", metavar=t("项目目录", "project dir"), help=t("项目根目录, 默认当前目录", "project root; defaults to the current directory"))
     return result
 
 
@@ -690,6 +852,10 @@ def main() -> int:
             return 0
         if args.command == "review":
             command_review(args.arguments)
+        if args.command == "compile-rules":
+            return command_compile_rules(args.source)
+        if args.command == "index":
+            return command_index(args.project)
         return 0
     except KeyboardInterrupt:
         print(t("\nonevoke: 用户取消, 配置未更改", "\nonevoke: cancelled; configuration was not changed"), file=sys.stderr)

@@ -11,13 +11,14 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from agent_registry import EXECUTION_AGENTS, REVIEW_AGENTS
+
 
 SCHEMA_VERSION = 1
-EXECUTION_AGENTS = ("codex", "claude", "grok")
-REVIEW_AGENTS = ("codex", "grok")
 REVIEW_ROLES = ("PM", "CSA", "Hacker", "QA")
 LAUNCHERS = ("tmux", "foreground")
 LANGUAGES = ("cn", "en")
+DEFAULT_MAX_CONCURRENT_TASKS = 3
 ARGPARSE_ZH = {
     "usage: ": "用法: ",
     "positional arguments": "位置参数",
@@ -100,6 +101,7 @@ def default_config() -> dict[str, Any]:
         "launcher": "tmux",
         "reviewers": {role: "codex" for role in REVIEW_ROLES},
         "memsearch": {"enabled": False},
+        "max_concurrent_tasks": DEFAULT_MAX_CONCURRENT_TASKS,
     }
 
 
@@ -142,6 +144,17 @@ def validate_config(raw: object) -> dict[str, Any]:
     if not isinstance(memsearch, dict) or not isinstance(memsearch.get("enabled"), bool):
         raise ConfigError(language_text("memsearch.enabled 必须是 boolean", "memsearch.enabled must be a boolean"))
 
+    max_concurrent_tasks = raw.get("max_concurrent_tasks", DEFAULT_MAX_CONCURRENT_TASKS)
+    if (
+        not isinstance(max_concurrent_tasks, int)
+        or isinstance(max_concurrent_tasks, bool)
+        or max_concurrent_tasks < 0
+    ):
+        raise ConfigError(language_text(
+            "max_concurrent_tasks 必须是非负整数 (0 表示不限制)",
+            "max_concurrent_tasks must be a non-negative integer (0 means unlimited)",
+        ))
+
     return {
         "schema_version": SCHEMA_VERSION,
         "welcome_complete": welcome_complete,
@@ -149,6 +162,7 @@ def validate_config(raw: object) -> dict[str, Any]:
         "launcher": launcher,
         "reviewers": validated_reviewers,
         "memsearch": {"enabled": memsearch["enabled"]},
+        "max_concurrent_tasks": max_concurrent_tasks,
     }
 
 

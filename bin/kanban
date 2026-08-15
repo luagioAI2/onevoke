@@ -18,6 +18,7 @@ from typing import Dict, Iterable, Optional
 
 from onevoke_config import (
     ARGPARSE_ZH,
+    EXECUTION_AGENTS,
     LANGUAGES,
     ConfigError,
     LocalizedArgumentParser,
@@ -25,6 +26,12 @@ from onevoke_config import (
     effective_config,
     language_text,
     load_config,
+)
+from agent_registry import (
+    AgentRegistryError,
+    agent_launch_args,
+    task_effort as registry_task_effort,
+    task_model as registry_task_model,
 )
 
 apply_language_argument(sys.argv[1:])
@@ -51,7 +58,7 @@ TYPE_NAMES = {
 }
 READY_SECTIONS = ("任务目标", "预期成果", "验收条件", "不在本轮范围")
 ARCHIVE_RESULTS = {"completed", "cancelled", "duplicate", "wontfix"}
-AGENT_NAMES = ("codex", "claude", "grok")
+AGENT_NAMES = EXECUTION_AGENTS
 NO_TITLE = t("(无标题)", "(untitled)")
 
 
@@ -853,33 +860,49 @@ def window_name(entry: Entry, text: str) -> str:
 
 
 def task_effort(agent: str, kind: str) -> str:
-    """按 Agent 和任务规模选推理强度. Grok 的档位比 Codex/Claude 高一档."""
-    if agent == "grok":
-        return "xhigh" if kind == "large" else "high"
-    return "high" if kind == "large" else "medium"
+    """按 Agent 注册表和任务规模选推理强度."""
+    try:
+        return registry_task_effort(agent, kind)
+    except AgentRegistryError:
+        raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
 
 
-def agent_command(agent: str, binary: str, effort: str) -> list[str]:
-    """拼 Agent 的 YOLO 启动参数. Grok 不锁模型, 只按任务规模传 --effort."""
-    if agent == "codex":
-        return [
-            binary,
-            "--model",
-            "gpt-5.6-sol",
-            "--config",
-            f'model_reasoning_effort="{effort}"',
-            "--dangerously-bypass-approvals-and-sandbox",
-        ]
-    if agent == "claude":
-        return [binary, "--model", "opus", "--effort", effort, "--dangerously-skip-permissions"]
-    if agent == "grok":
-        return [binary, "--effort", effort, "--permission-mode", "bypassPermissions"]
-    raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
+def task_model(agent: str, kind: str) -> str:
+    """按 Agent 注册表和任务规模选模型."""
+    try:
+        return registry_task_model(agent, kind)
+    except AgentRegistryError:
+        raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
+
+
+def agent_command(agent: str, binary: str, model: str, effort: str, prompt: str) -> list[str]:
+    """按注册表模板拼 Agent 的启动参数, argv[0] 是二进制路径."""
+    try:
+        return agent_launch_args(agent, binary, model, effort, prompt)
+    except AgentRegistryError:
+        raise KanbanError(t(f"不支持的 Agent: {agent}", f"Unsupported Agent: {agent}"))
+
+
+def check_concurrency(config: dict, board: Board) -> None:
+    """按 max_concurrent_tasks 限制 working 卡并发数 (0 表示不限制)."""
+    limit = int(os.environ.get("KANBAN_MAX_CONCURRENT_TASKS", config["max_concurrent_tasks"]))
+    if limit <= 0:
+        return
+    working = sum(1 for entry in board.entries.values() if entry.state == "working")
+    if working >= limit:
+        raise KanbanError(t(
+            f"已达到并发上限: working 中有 {working} 张卡, max_concurrent_tasks={limit} "
+            f"(0 关闭限制); 先完成或归档部分任务再启动.",
+            f"Concurrency limit reached: {working} tasks in working, "
+            f"max_concurrent_tasks={limit} (set 0 to disable); finish or archive tasks first.",
+        ))
 
 
 def command_start(args: argparse.Namespace, root: Path) -> None:
-    entry = select_todo(load_board(root), args.task)
+    board = load_board(root)
+    entry = select_todo(board, args.task)
     config = effective_config(load_config())
+    check_concurrency(config, board)
     agent_name = args.agent or config["kanban_agent"]
     launcher = args.launcher or config["launcher"]
     agent = shutil.which(agent_name)
@@ -901,14 +924,23 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
     original = read_document(entry)
     updated = start_metadata(original, agent_name)
     moved = move_entry(entry, root, "working")
+    group_hint = ""
+    if "任务组:" in original:
+        group_hint = (
+            " 本卡属于任务组: 若同组有已完成的卡片, 先读其「完成总结」和"
+            "「实施与验证」章节, 复用其上下文和决策, 避免重复探索."
+        )
     prompt = (
-        f"执行 Kanban 任务 {entry.task_id}. 先运行 kanban rules, 再运行 "
-        f"kanban show {entry.task_id}. 卡片已进入 working. 遵守目标项目 AGENTS.md, "
-        "补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
+        f"执行 Kanban 任务 {entry.task_id}. 若 ~/.agents/SUMMARY.md 存在先读它, "
+        f"再运行 kanban rules 和 kanban show {entry.task_id}; 若项目根有 "
+        ".onevoke/context.md 先读它, 可显著节省探索成本. 卡片已进入 working. "
+        f"遵守目标项目 AGENTS.md, 补充任务分支, 并按项目规则完成任务、验证、审核、集成和看板收尾."
+        f"{group_hint}"
     )
     name = window_name(entry, original)
     effort = task_effort(agent_name, entry.kind)
-    agent_argv = [*agent_command(agent_name, agent, effort), prompt]
+    model = getattr(args, "model", None) or task_model(agent_name, entry.kind)
+    agent_argv = agent_command(agent_name, agent, model, effort, prompt)
     try:
         write_text_atomic(moved.document, updated, entry=moved)
         if launcher == "tmux":
@@ -1035,6 +1067,7 @@ def parser() -> argparse.ArgumentParser:
     start_parser = commands.add_parser("start", help=t("领取任务并按 Onevoke 配置启动 Agent", "claim a task and launch an Agent using Onevoke configuration"))
     start_parser.add_argument("task", nargs="?", metavar=t("任务", "task"))
     start_parser.add_argument("--agent", choices=AGENT_NAMES, help=t("覆盖配置中的默认 Agent", "override the configured default Agent"))
+    start_parser.add_argument("--model", metavar=t("模型", "model"), help=t("覆盖注册表中的默认模型", "override the registered default model"))
     start_parser.add_argument(
         "--launcher", choices=("tmux", "foreground"), help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
