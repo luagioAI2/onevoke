@@ -410,7 +410,8 @@ def section_body(text: str, heading: str) -> Optional[str]:
 
 
 def result_from(text: str) -> str:
-    match = re.search(r"(?m)^- 结果:\s*(.*?)\s*$", text)
+    # 只用水平空白, 防止 `- 结果:` 后跟空行时跨行吞掉下一行.
+    match = re.search(r"(?m)^- 结果:[ \t]*(.*?)[ \t]*$", text)
     return match.group(1) if match else ""
 
 
@@ -1091,6 +1092,93 @@ def command_start(args: argparse.Namespace, root: Path) -> None:
         ))
 
 
+def finish_one(entry: Entry, root: Path, auto_summary: bool = True) -> None:
+    """用户确认收尾: 填结果 completed + 完成总结, 再 move done.
+
+    前置条件: 卡片在 working, 且「实施与验证」已填写 (Agent 已完成实现).
+    这是「用户验收确认」的机械化: 填卡与迁移由命令完成, 用户只确认.
+    """
+    text = read_document(entry)
+    result = result_from(text)
+    if result not in ("", None):
+        raise KanbanError(t(
+            f"卡片已填写结果: {result!r}; 无需再次收尾. 若要归档请用 move archived.",
+            f"Task already has a result: {result!r}; nothing to finish. Use move archived to archive.",
+        ))
+    implementation = section_body(text, "实施与验证") or ""
+    if not implementation or "<填写>" in implementation:
+        raise KanbanError(t(
+            f"卡片 {entry.task_id} 的「实施与验证」尚未填写, 不能收尾; "
+            f"确认 Agent 已完成实现后再运行 finish.",
+            f"Task {entry.task_id} has no implementation log; refusing to finish. "
+            f"Confirm the Agent completed the work first.",
+        ))
+
+    now = datetime.now().strftime("%Y-%m-%d %H:%M")
+    updated = re.sub(r"(?m)^- 结果:.*$", "- 结果: completed", text, count=1)
+    if auto_summary:
+        # 自动生成完成总结: 从实施与验证提炼首行 + 验收时间.
+        first_line = next(
+            (line.strip() for line in implementation.splitlines() if line.strip()),
+            "已实现并验证",
+        )
+        summary = f"用户验收通过 ({now}); 实施与验证: {first_line[:80]}"
+        summary_marker = "## 完成总结"
+        if summary_marker in updated:
+            updated = re.sub(
+                rf"(?m)^{re.escape(summary_marker)}\s*$",
+                f"{summary_marker}\n\n{summary}\n",
+                updated,
+                count=1,
+            )
+            # 清掉完成总结章节残留的 <填写> 占位符.
+            idx = updated.find(summary_marker)
+            if idx >= 0:
+                updated = updated[:idx] + updated[idx:].replace("<填写>", "", 1)
+        else:
+            updated += f"\n\n{summary_marker}\n\n{summary}\n"
+    if updated != text:
+        # 先落盘, move_entry 的 done 门禁才能读到结果与完成总结.
+        write_text_atomic(entry.document, updated, entry=entry)
+    move_entry(entry, root, "done")
+    print(t(f"已收尾: {entry.task_id} -> done", f"finished: {entry.task_id} -> done"))
+
+
+def command_finish(args: argparse.Namespace, root: Path) -> None:
+    board = load_board(root)
+    if getattr(args, "all", False):
+        targets = sorted(
+            (entry for entry in board.entries.values() if entry.state == "working"),
+            key=lambda entry: entry.task_id,
+        )
+        if not targets:
+            raise KanbanError(t("working 中没有任务", "No tasks in working"))
+        finished = 0
+        for entry in targets:
+            try:
+                finish_one(entry, root)
+                finished += 1
+            except KanbanError as error:
+                print(t(f"跳过: {entry.task_id}: {error}", f"skipped: {entry.task_id}: {error}"), file=sys.stderr)
+        print(t(
+            f"批量收尾完成: {finished}/{len(targets)} 张卡进入 done",
+            f"batch finish done: {finished}/{len(targets)} tasks moved to done",
+        ))
+        return
+    if not args.task:
+        raise KanbanError(t(
+            "finish 需要任务 ID, 或用 --all 批量收尾全部 working 卡",
+            "finish requires a task ID, or use --all to finish all working tasks",
+        ))
+    entry = locate(board, args.task)
+    if entry.state != "working":
+        raise KanbanError(t(
+            f"只能收尾 working 任务: {entry.task_id} 当前位于 {entry.state}",
+            f"Only working tasks can be finished: {entry.task_id} is in {entry.state}",
+        ))
+    finish_one(entry, root)
+
+
 def command_check(root: Path) -> int:
     board = scan(root)
     for problem in board.problems:
@@ -1152,6 +1240,10 @@ def parser() -> argparse.ArgumentParser:
         "--launcher", choices=("tmux", "foreground"), help=t("覆盖配置中的启动方式", "override the configured launcher")
     )
 
+    finish_parser = commands.add_parser("finish", help=t("用户确认收尾: 填完成记录并移入 done", "confirm a working task: fill completion and move to done"))
+    finish_parser.add_argument("task", nargs="?", metavar=t("任务", "task"))
+    finish_parser.add_argument("--all", action="store_true", help=t("批量收尾全部 working 卡", "finish all working tasks"))
+
     commands.add_parser("check", help=t("检查看板不变量", "check board invariants"))
     return result
 
@@ -1178,6 +1270,8 @@ def main() -> int:
             command_pick(args, root)
         elif args.command == "start":
             command_start(args, root)
+        elif args.command == "finish":
+            command_finish(args, root)
         elif args.command == "check":
             return command_check(root)
         return 0
