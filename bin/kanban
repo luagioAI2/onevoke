@@ -973,14 +973,19 @@ def _start_one(
                     ))
                 key_env = f"export {key_name}={shlex.quote(key_value)}; "
             command = key_env + shlex.join(agent_argv)
-            # 会话结束后自动展示待验收清单, 并用 while 循环保活窗口:
-            # 不依赖按键 (QuickTUI 下 read 会因 EOF 退出导致窗口关闭),
-            # 窗口一直保留展示"等你确认", 看完用 tmux kill-window 或 QuickTUI 关闭.
+            # 会话结束后展示待验收清单, 并进入交互确认:
+            # 窗口里输入 1 / y / 验收通过 即执行 kanban finish; 之后保持交互 shell.
+            # 不再用 while 保活 (不读输入, 用户在窗口里敲字无效).
+            kanban_cmd = shlex.quote(str(Path.home() / ".local" / "bin" / "kanban"))
             hook = (
                 f" ; echo; echo '{t('=== 会话结束, 检查待验收 ===', '=== session ended, check pending ===')}'; "
-                f"{shlex.quote(str(Path.home() / '.local' / 'bin' / 'kanban'))} pending; "
-                f"echo; echo '{t('(窗口保留; 确认验收请运行 kanban finish <task-id>; 关闭本窗口用 tmux kill-window)', '(window kept open; confirm with kanban finish <task-id>; close with tmux kill-window)')}'; "
-                f"while true; do sleep 600; done"
+                f"{kanban_cmd} pending; "
+                f"echo; echo '{t('输入 1 / y / 验收通过 确认验收并收尾 (等价 kanban finish {entry.task_id})', 'type 1 / y / accept to confirm (same as kanban finish {entry.task_id})')}'; "
+                f"read -r -p '> ' __choice; "
+                f"if [ \"$__choice\" = \"1\" ] || [ \"$__choice\" = \"y\" ] || [ \"$__choice\" = \"Y\" ] || [ \"$__choice\" = \"验收通过\" ]; then "
+                f"{kanban_cmd} finish {entry.task_id}; fi; "
+                f"echo; echo '{t('窗口保留; 可输入 exit 退出', 'window kept open; type exit to close')}'; "
+                f"exec bash"
             )
             command += hook
             result = subprocess.run(
