@@ -136,6 +136,8 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "kind": "cli",
         "binary": "omp",
         "api_key_env": "DEEPSEEK_API_KEY",
+        # --print 非交互模式: 跳过 provider 登录引导 (自定义 deepseek provider
+        # 不在交互登录列表里), 直接干活并退出; 任务窗口由 kanban hook 保持.
         "launch_template": [
             "--print", "--auto-approve",
             "--model", "deepseek/{model}",

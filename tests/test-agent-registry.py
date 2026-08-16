@@ -381,9 +381,9 @@ class KanbanIntegrationTest(unittest.TestCase):
         self.assertIn("Agent=omp", result.stdout)
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertIn(str(self.fake_bin / "omp"), command)
-        self.assertIn("--print", command)
         self.assertIn("--auto-approve", command)
         self.assertIn("--model deepseek/deepseek-chat", command)
+        self.assertNotIn("--print", command)
         self.assertIn(task_id, command)
 
 
