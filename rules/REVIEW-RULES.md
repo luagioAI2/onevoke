@@ -4,14 +4,12 @@
 
 ## Reviewer 选择
 
-- 支持 Codex、Grok、DeepSeek、GLM 四个 reviewer. 除下表列出的 wrapper 与隔离参数外, 本文件全部规则对它们一致. wrapper 都装在 `~/.local/bin/`, 由 `bin/agent_registry.py` 注册表驱动, 新增 reviewer 只需在注册表登记并准备对应 wrapper.
+- 支持 Codex 与 Grok 两个 reviewer. 除下表列出的 wrapper 与隔离参数外, 本文件全部规则对两者一致. wrapper 都装在 `~/.local/bin/`.
 
 | reviewer | wrapper | CLI | wrapper 的隔离参数 |
 |---|---|---|---|
 | Codex | `codex-review.sh` | `codex` | `--sandbox read-only`, `--ephemeral` |
 | Grok | `grok-review.sh` | `grok` | `--sandbox read-only`, `--no-memory`, `--no-subagents` |
-| DeepSeek | `deepseek-review.sh` | `deepseek` (llm-agent 适配器) | `review` 只读模式, 禁写工具与命令执行 |
-| GLM | `glm-review.sh` | `glm` (llm-agent 适配器) | 同 DeepSeek |
 
 - `PM`, `CSA`, `Hacker`, `QA` 分别选择 reviewer. 按优先级取该角色第一个明确指定的来源: (1) 当前任务的用户指令; (2) 离目标文件最近的项目级 `AGENTS.md` 或 `CLAUDE.md`; (3) 用户自己的全局规则; (4) `~/.config/onevoke/config.json` 中该角色的取值. 前三档都未指定时运行 `onevoke review`, 由它读取第 (4) 档; 配置不存在时回落到 Codex.
 - 第 (3) 档只对本节的 reviewer 取值有效, 是本分册为自身设定声明的额外来源, 不改变 `~/.agents/ONEVOKE-AGENTS.md` 的通用优先级链. 该档文件已在会话上下文里就直接判读; 未自动载入且当前任务需要判定时读取它, 读不到按未指定处理.

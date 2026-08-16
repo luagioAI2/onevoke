@@ -30,7 +30,7 @@ kanban show <task-id>
 kanban new [--large] <feature|bug|chore|research> <slug> <title...>
 kanban move <task-id> <todo|working|done|archived|trash>
 kanban pick [task-id]
-kanban start [--all] [--limit N] [--agent codex|claude|grok|deepseek|glm] [--model <模型>] [--launcher tmux|foreground] [task-id]
+kanban start [--agent codex|claude|grok] [--launcher tmux|foreground] [task-id]
 kanban check
 ```
 
@@ -38,11 +38,9 @@ kanban check
 - `list` 按状态分组, 组内按显示时间倒序; 同时或缺失时按任务 ID 倒序. 默认输出彩色表格并标出规模; `--mobile` 输出竖屏布局. `working` 显示开始时间, `done` 显示完成时间; 旧卡缺完成时间时用任务文档最后修改时间.
 - `new` 在 `backlog/` 创建小任务; `--large` 创建含 `spec.md` 的大任务目录.
 - `pick` 执行 `backlog -> todo` 及完整性校验; 不给 ID 时只列候选. `move` 只执行「状态模型」允许且满足目标要求的迁移.
-- `start` 只接受 `todo` 卡片. 它原子执行 `todo -> working`, 写负责人和开始时间, 再启动执行 Agent. `--all` 批量启动全部 `todo` 卡 (每个一个 tmux 窗口), `--limit N` 限制本次最多启动数; 批量启动只支持 tmux launcher, 并受 `max_concurrent_tasks` 约束, 满员时拒绝并提示.
-- `start` 的 Agent 默认取 Onevoke 配置 `kanban_agent`, welcome 未完成时回落到 Codex; `--agent` 只覆盖本次. 模型与推理强度由 Agent 注册表 (`bin/agent_registry.py`) 按任务规模决定: Codex `gpt-5.6-sol/high|medium`, Claude `opus/high|medium`, Grok 不锁模型 `--effort xhigh|high`, DeepSeek `deepseek-reasoner|deepseek-chat`, GLM `glm-4.5`; `--model` 只覆盖本次.
+- `start` 只接受 `todo` 卡片. 它原子执行 `todo -> working`, 写负责人和开始时间, 再启动执行 Agent.
+- `start` 的 Agent 默认取 Onevoke 配置 `kanban_agent`, welcome 未完成时回落到 Codex; `--agent` 只覆盖本次. 大任务用 Codex `gpt-5.6-sol/high` 或 Claude `opus/high`, 小任务用对应 `medium`; Grok 不锁模型, 大任务 `--effort xhigh`, 小任务 `--effort high`.
 - `start` 默认使用 Agent 的免确认模式. launcher 默认取 Onevoke 配置, `--launcher` 只覆盖本次. 两种模式的 cwd 都是项目根: `tmux` 只在当前 session 建 `kb-<任务标题>` window, 不建 session; `foreground` 要求三个标准流都是 TTY 并等待 Agent 退出.
-- `start` 按配置 `max_concurrent_tasks` 限制 `working/` 并发卡数 (0 关闭, 默认 3), 达到上限时拒绝启动并提示; 环境变量 `KANBAN_MAX_CONCURRENT_TASKS` 可临时覆盖.
-- `start` 的 prompt 引导执行 Agent 先读 `~/.agents/SUMMARY.md` (存在时) 和项目 `.onevoke/context.md` (存在时), 再读分册和卡片, 减少重复探索; 任务组卡片还会提示复用已完成前置卡的「完成总结」.
 - `check` 列出全部无效入口并以非零退出. 其他命令忽略无关的无效入口, 只在目标任务违规时失败; 状态目录缺失或不可写时全部失败.
 - 命令只做结构和机械校验; 授权, 依赖, 验收和终止理由由 Agent 按本文件判断.
 
@@ -215,7 +213,6 @@ kanban move <task-id> working
 ```
 
 - 合回时机取 `~/.agents/ONEVOKE-AGENTS.md`「看板任务完成」. 默认先报告并等用户验收; 未确认前不集成, 不清理, 卡片留 `working/`. 15 分钟超时不适用于验收或集成确认.
-- 验收确认是对话式交互, 由用户发起: 执行 Agent 完成任务后, 在会话/窗口里询问用户是否验收, 用户明确回复"验收通过" (或等价确认词) 后, Agent 填 `结果: completed` 和「完成总结」并 `move done`, 再发完成报告. 用户未确认前卡片留 `working/`, 不集成不清理. 用户拒绝时卡片保留 `working/` 并记录原因.
 - 实现, 验证记录, 必要审核, 用户验收及适用的集成清理全部完成后, 才可填写完成总结或 `report.md` 和 `结果: completed`, 再执行 `kanban move <task-id> done` 和 `kanban check`. 非代码任务的不适用项写 `N/A`.
 
 ## 完成报告
