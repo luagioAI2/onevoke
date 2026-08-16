@@ -130,6 +130,23 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "memsearch": False,
         "review": True,
     },
+    "omp": {
+        "label": "OMP",
+        "kind": "cli",
+        "binary": "omp",
+        "launch_template": [
+            "--print", "--auto-approve",
+            "--model", "deepseek/{model}",
+            "{prompt}",
+        ],
+        "default_model": "deepseek-chat",
+        "models": {"large": "deepseek-reasoner", "small": "deepseek-chat"},
+        "effort": {"large": "xhigh", "small": "high"},
+        "rules_path": "~/.omp/AGENTS.md",
+        "rules_mode": "merge",
+        "memsearch": False,
+        "review": True,
+    },
 }
 
 # 全部执行 Agent (welcome / kanban --agent 的选择来源)

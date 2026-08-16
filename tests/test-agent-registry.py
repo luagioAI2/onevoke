@@ -62,12 +62,13 @@ class RegistryStructureTest(unittest.TestCase):
 
     def test_supported_agent_set(self) -> None:
         self.assertEqual(
-            ("codex", "claude", "grok", "deepseek", "glm", "dsh"),
+            ("codex", "claude", "grok", "deepseek", "glm", "dsh", "omp"),
             self.registry.EXECUTION_AGENTS,
         )
         self.assertIn("deepseek", self.registry.REVIEW_AGENTS)
         self.assertIn("glm", self.registry.REVIEW_AGENTS)
         self.assertIn("dsh", self.registry.REVIEW_AGENTS)
+        self.assertIn("omp", self.registry.REVIEW_AGENTS)
         self.assertNotIn("claude", self.registry.REVIEW_AGENTS)
 
     def test_unsupported_agent_raises(self) -> None:
@@ -369,6 +370,20 @@ class KanbanIntegrationTest(unittest.TestCase):
         self.assertIn("exec", command)
         self.assertIn("--model deepseek-chat", command)
         self.assertIn("--effort medium", command)
+        self.assertIn(task_id, command)
+
+    def test_start_omp_builds_print_argv(self) -> None:
+        self.fake_agent("omp")
+        task_id, _ = self.make_todo("omp-start")
+
+        result = self.run_command("start", "--agent", "omp", task_id)
+
+        self.assertIn("Agent=omp", result.stdout)
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn(str(self.fake_bin / "omp"), command)
+        self.assertIn("--print", command)
+        self.assertIn("--auto-approve", command)
+        self.assertIn("--model deepseek/deepseek-chat", command)
         self.assertIn(task_id, command)
 
 
