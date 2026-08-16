@@ -963,8 +963,10 @@ def _start_one(
             # 必须把 API key 显式拼进窗口命令, 否则 API 类 Agent 会 401.
             spec = agent_spec(agent_name)
             key_env = ""
-            if spec["kind"] == "api":
-                key_name = agent_name.upper() + "_API_KEY"
+            key_name = spec.get("api_key_env") or (
+                agent_name.upper() + "_API_KEY" if spec["kind"] == "api" else None
+            )
+            if key_name:
                 key_value = os.environ.get(key_name)
                 if not key_value:
                     raise KanbanError(t(

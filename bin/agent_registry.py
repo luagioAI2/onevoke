@@ -119,6 +119,7 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "label": "DeepSeek-CLI",
         "kind": "cli",
         "binary": "dsh",
+        "api_key_env": "DEEPSEEK_API_KEY",
         "launch_template": [
             "exec", "--model", "{model}", "--effort", "{effort}", "{prompt}",
         ],
@@ -134,6 +135,7 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "label": "OMP",
         "kind": "cli",
         "binary": "omp",
+        "api_key_env": "DEEPSEEK_API_KEY",
         "launch_template": [
             "--print", "--auto-approve",
             "--model", "deepseek/{model}",
