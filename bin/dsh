@@ -1,23 +1,68 @@
 #!/usr/bin/env python3
 
-"""dsh — DeepSeek Harness 官方 CLI 的 Onevoke 薄壳.
+"""dsh — DeepSeek Harness 官方 CLI 的 Onevoke 薄壳 (TUI 交互模式).
 
-把 DeepSeek 官方 CLI (@deepseek-ai/dsh, headless profile) 包装成 Onevoke
-的 Agent 二进制契约:
+把 DeepSeek Harness 官方 CLI 包装成 Onevoke 的 Agent 二进制契约:
   dsh --version                    能力探测 (doctor / welcome)
-  dsh exec --model M --effort E <prompt>   执行任务: dsh --profile headless
-底层调用: node.exe + E:\\home\\luagio\\dsh 下的官方 CLI 包.
+  dsh exec --model M --effort E <prompt>   启动交互式 TUI 会话并注入任务
+
+与 codex/claude/grok 一样: 任务启动后 tmux 窗口里是活的 CLI session,
+实时看到 agent 工作、可交互、执行完后 session 保持可继续对话.
+
+实现:
+- 优先调用 PATH 上的原生 `dsh` (WSL Linux 版, stdio 是真 TTY, tui 可渲染);
+  若只有 Windows node.exe 版官方 CLI, 则回退到 node.exe 调用 (stdio 非
+  TTY 时 tui 无法启动, 只能 headless).
+- TUI 就绪后通过 tmux send-keys 注入任务 prompt 并回车, 让 agent 自动开工.
+
+tui profile 需要先初始化: dsh plugin --profile tui add @dsh-tui/dsh-tui
+(或在 profile 目录用 pnpm 手动安装). 模型等 profile 配置见
+~/.dsh/profiles/tui/cordis.patch.yml.
 """
 
 import os
-import shlex
+import shutil
 import subprocess
 import sys
+import threading
+import time
 
-VERSION = "dsh-onevoke 1.0.0 (deepseek-harness headless)"
+VERSION = "dsh-onevoke 3.0.0 (deepseek-harness tui)"
 
+# 官方 CLI 入口: 优先 WSL 原生 dsh; 找不到则回退 Windows node.exe + bin.js
 NODE = "/mnt/e/Program Files/nvm4w/nodejs/node.exe"
 DSH_ENTRY = r"E:\home\luagio\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js"
+
+
+def _resolve_cli() -> tuple[list[str], bool]:
+    """返回 (官方 CLI 启动 argv, 是否原生 tty 可用)."""
+    native = shutil.which("dsh", path="/usr/bin:/bin:/usr/local/bin")
+    if native:
+        return [native], True
+    return [NODE, DSH_ENTRY], os.isatty(0) and os.isatty(1)
+
+
+def _inject_prompt(prompt: str, native_tty: bool) -> None:
+    """TUI 就绪后把任务 prompt 注入当前 tmux 窗口并回车."""
+    if not native_tty:
+        return  # 非 TTY 回退 headless, 任务直接作为参数传入, 无需注入
+    pane = os.environ.get("TMUX_PANE")
+    if not pane:
+        return
+    time.sleep(8)  # 等 TUI 界面渲染完成
+    try:
+        subprocess.run(
+            ["tmux", "send-keys", "-t", pane, "-l", prompt],
+            check=True,
+            timeout=10,
+        )
+        subprocess.run(
+            ["tmux", "send-keys", "-t", pane, "Enter"],
+            check=True,
+            timeout=10,
+        )
+    except Exception as exc:  # 注入失败不致命, TUI 仍在可手动输入
+        print(f"dsh: 任务注入失败(可手动粘贴): {exc}", file=sys.stderr)
 
 
 def main() -> int:
@@ -41,8 +86,16 @@ def main() -> int:
         if not prompt:
             print("dsh: exec 需要任务 prompt", file=sys.stderr)
             return 2
+        cli, native_tty = _resolve_cli()
+        if native_tty:
+            # 交互式 TUI: 后台线程注入任务, 前台跑 TUI (继承 stdio = 真 TTY)
+            threading.Thread(
+                target=_inject_prompt, args=(prompt, native_tty), daemon=True
+            ).start()
+            return subprocess.run([*cli, "--profile", "tui"], check=False).returncode
+        # 非 TTY 回退: headless 一次性执行 (stdout 捕获后打印)
         result = subprocess.run(
-            [NODE, DSH_ENTRY, "--profile", "headless", prompt],
+            [*cli, "--profile", "headless", prompt],
             text=True,
             capture_output=True,
             check=False,
@@ -53,16 +106,8 @@ def main() -> int:
             print(result.stderr, file=sys.stderr)
         return result.returncode
     # 其他情况: 透传给官方 CLI
-    result = subprocess.run(
-        [NODE, DSH_ENTRY, *argv],
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    if result.stdout:
-        print(result.stdout)
-    if result.stderr:
-        print(result.stderr, file=sys.stderr)
+    cli, _ = _resolve_cli()
+    result = subprocess.run([*cli, *argv], text=True, check=False)
     return result.returncode
 
 

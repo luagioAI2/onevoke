@@ -120,6 +120,10 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "kind": "cli",
         "binary": "dsh",
         "api_key_env": "DEEPSEEK_API_KEY",
+        # TUI 交互模式: 薄壳优先调用 WSL 原生 dsh --profile tui (真 TTY,
+        # 与 codex/claude/grok 一样的活 CLI session, 任务由 tmux 注入);
+        # 非 TTY 环境回退 headless 一次性执行. 模型/推理强度由薄壳透传,
+        # 实际生效值由 tui profile 的 agent-loop 配置决定.
         "launch_template": [
             "exec", "--model", "{model}", "--effort", "{effort}", "{prompt}",
         ],

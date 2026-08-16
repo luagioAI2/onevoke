@@ -358,7 +358,9 @@ class KanbanIntegrationTest(unittest.TestCase):
         self.assertIn("DEEPSEEK_API_KEY", result.stderr)
         self.assertTrue((self.root / "todo" / f"{task_id}.md").exists())
 
-    def test_start_dsh_builds_headless_argv(self) -> None:
+    def test_start_dsh_builds_exec_argv(self) -> None:
+        # dsh 薄壳按 launch_template 拼 `exec --model --effort <prompt>`;
+        # 薄壳内部再决定走 tui (TTY) 还是 headless (非 TTY), 与 CLI argv 无关.
         self.fake_agent("dsh")
         task_id, _ = self.make_todo("dsh-start")
 
@@ -381,9 +383,9 @@ class KanbanIntegrationTest(unittest.TestCase):
         self.assertIn("Agent=omp", result.stdout)
         command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
         self.assertIn(str(self.fake_bin / "omp"), command)
+        self.assertIn("--print", command)
         self.assertIn("--auto-approve", command)
         self.assertIn("--model deepseek/deepseek-chat", command)
-        self.assertNotIn("--print", command)
         self.assertIn(task_id, command)
 
 
