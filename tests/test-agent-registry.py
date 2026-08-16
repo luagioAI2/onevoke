@@ -62,11 +62,12 @@ class RegistryStructureTest(unittest.TestCase):
 
     def test_supported_agent_set(self) -> None:
         self.assertEqual(
-            ("codex", "claude", "grok", "deepseek", "glm"),
+            ("codex", "claude", "grok", "deepseek", "glm", "dsh"),
             self.registry.EXECUTION_AGENTS,
         )
         self.assertIn("deepseek", self.registry.REVIEW_AGENTS)
         self.assertIn("glm", self.registry.REVIEW_AGENTS)
+        self.assertIn("dsh", self.registry.REVIEW_AGENTS)
         self.assertNotIn("claude", self.registry.REVIEW_AGENTS)
 
     def test_unsupported_agent_raises(self) -> None:
@@ -355,6 +356,20 @@ class KanbanIntegrationTest(unittest.TestCase):
 
         self.assertIn("DEEPSEEK_API_KEY", result.stderr)
         self.assertTrue((self.root / "todo" / f"{task_id}.md").exists())
+
+    def test_start_dsh_builds_headless_argv(self) -> None:
+        self.fake_agent("dsh")
+        task_id, _ = self.make_todo("dsh-start")
+
+        result = self.run_command("start", "--agent", "dsh", task_id)
+
+        self.assertIn("Agent=dsh", result.stdout)
+        command = (self.root / "tmux.log").read_text(encoding="utf-8").splitlines()[-1]
+        self.assertIn(str(self.fake_bin / "dsh"), command)
+        self.assertIn("exec", command)
+        self.assertIn("--model deepseek-chat", command)
+        self.assertIn("--effort medium", command)
+        self.assertIn(task_id, command)
 
 
 if __name__ == "__main__":

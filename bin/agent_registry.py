@@ -115,6 +115,21 @@ AGENT_REGISTRY: dict[str, dict[str, Any]] = {
         "memsearch": False,
         "review": True,
     },
+    "dsh": {
+        "label": "DeepSeek-CLI",
+        "kind": "cli",
+        "binary": "dsh",
+        "launch_template": [
+            "exec", "--model", "{model}", "--effort", "{effort}", "{prompt}",
+        ],
+        "default_model": "deepseek-chat",
+        "models": {"large": "deepseek-reasoner", "small": "deepseek-chat"},
+        "effort": {"large": "high", "small": "medium"},
+        "rules_path": "~/.deepseek/AGENTS.md",
+        "rules_mode": "merge",
+        "memsearch": False,
+        "review": True,
+    },
 }
 
 # 全部执行 Agent (welcome / kanban --agent 的选择来源)

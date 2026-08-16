@@ -1,0 +1,70 @@
+#!/usr/bin/env python3
+
+"""dsh — DeepSeek Harness 官方 CLI 的 Onevoke 薄壳.
+
+把 DeepSeek 官方 CLI (@deepseek-ai/dsh, headless profile) 包装成 Onevoke
+的 Agent 二进制契约:
+  dsh --version                    能力探测 (doctor / welcome)
+  dsh exec --model M --effort E <prompt>   执行任务: dsh --profile headless
+底层调用: node.exe + E:\\home\\luagio\\dsh 下的官方 CLI 包.
+"""
+
+import os
+import shlex
+import subprocess
+import sys
+
+VERSION = "dsh-onevoke 1.0.0 (deepseek-harness headless)"
+
+NODE = "/mnt/e/Program Files/nvm4w/nodejs/node.exe"
+DSH_ENTRY = r"E:\home\luagio\dsh\node_modules\@deepseek-ai\dsh\lib\bin.js"
+
+
+def main() -> int:
+    argv = sys.argv[1:]
+    if argv == ["--version"]:
+        print(VERSION)
+        return 0
+    if argv and argv[0] == "exec":
+        argv = argv[1:]
+        prompt_parts = []
+        while argv:
+            arg = argv.pop(0)
+            if arg in ("--model", "--effort", "--provider"):
+                if argv:
+                    argv.pop(0)
+                continue
+            if arg.startswith("--"):
+                continue
+            prompt_parts.append(arg)
+        prompt = " ".join(prompt_parts).strip()
+        if not prompt:
+            print("dsh: exec 需要任务 prompt", file=sys.stderr)
+            return 2
+        result = subprocess.run(
+            [NODE, DSH_ENTRY, "--profile", "headless", prompt],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.stdout:
+            print(result.stdout)
+        if result.stderr:
+            print(result.stderr, file=sys.stderr)
+        return result.returncode
+    # 其他情况: 透传给官方 CLI
+    result = subprocess.run(
+        [NODE, DSH_ENTRY, *argv],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.stdout:
+        print(result.stdout)
+    if result.stderr:
+        print(result.stderr, file=sys.stderr)
+    return result.returncode
+
+
+if __name__ == "__main__":
+    sys.exit(main())
